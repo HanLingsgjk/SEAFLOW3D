@@ -71,7 +71,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_flow3d_ab.py --name pretrain --stage abtra
 
 Before running training, please modify the dataset path accordingly.
 
-## Testing
+## Demo
 
 Before testing, please set the paths of the left and right input images in `RFlow3Dtest.py`:
 
