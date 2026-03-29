@@ -73,7 +73,7 @@ Before running training, please modify the dataset path accordingly.
 
 ## Demo
 
-Before testing, please set the paths of the left and right input images in `RFlow3Dtest.py` , and download the checkpoint https://drive.google.com/file/d/1F6Un4IERPCUOzNpJ46z8KLPNq7gq6nsg/view?usp=drive_link:
+Before testing, please set the paths of the left and right input images in `RFlow3Dtest.py`
 
 ```python
 def Demo_runtime(model):
@@ -84,7 +84,7 @@ def Demo_runtime(model):
 Then run:
 
 ```bash
-python RFlow3Dtest.py --model=/mnt/hdd/home/linghan/SEAFLOW3D/checkpoints/tartain.pth
+python RFlow3Dtest.py --model=/mnt/hdd/home/linghan/SEAFLOW3D/checkpoints/RFlow3D_all_mixed.pth
 ```
 
 Please make sure the checkpoint path is correct before testing.
