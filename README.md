@@ -73,7 +73,7 @@ Before running training, please modify the dataset path accordingly.
 
 ## Demo
 
-Before testing, please set the paths of the left and right input images in `RFlow3Dtest.py`:
+Before testing, please set the paths of the left and right input images in `RFlow3Dtest.py` , and download the checkpoint https://drive.google.com/file/d/1F6Un4IERPCUOzNpJ46z8KLPNq7gq6nsg/view?usp=drive_link:
 
 ```python
 def Demo_runtime(model):
