@@ -59,7 +59,7 @@ cd ..
 
 Before training, please set the dataset path correctly in the corresponding scripts.
 
-Make sure the dataset directory structure matches the code requirements.
+Make sure the dataset directory structure matches the code requirements.(at Dataset_home/dataset_3dflowuvd.py)
 
 ## Training
 
@@ -94,7 +94,7 @@ Please make sure the checkpoint path is correct before testing.
 We provide the official pretrained model at:
 
 **Checkpoint link:** [[all_mix]](https://drive.google.com/file/d/1F6Un4IERPCUOzNpJ46z8KLPNq7gq6nsg/view?usp=drive_link)
-**Checkpoint link:** [[kitti]](https://drive.google.com/file/d/14ZlkAboebGLVQ_XwbYmeuiJl5NScvHKU/view?usp=drive_link)
+ [[kitti]](https://drive.google.com/file/d/14ZlkAboebGLVQ_XwbYmeuiJl5NScvHKU/view?usp=drive_link)
 After downloading the checkpoint, update the model path in the testing command accordingly.
 
 ## Notes
