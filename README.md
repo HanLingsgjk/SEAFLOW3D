@@ -1,6 +1,8 @@
+<img width="2979" height="1646" alt="git" src="https://github.com/user-attachments/assets/364201cf-f229-4c61-bd81-a6b6513d15b6" />
 # SEAFLOW3D
 
 This repository contains the official implementation of our paper on stereo scene flow estimation.
+<img width="806" height="395" alt="image" src="https://github.com/user-attachments/assets/07abcc97-7fcf-4dbe-9afb-ce0dceee746e" />
 
 ## Paper
 
