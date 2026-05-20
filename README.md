@@ -1,4 +1,4 @@
-<img width="2979" height="1646" alt="git" src="https://github.com/user-attachments/assets/364201cf-f229-4c61-bd81-a6b6513d15b6" />
+
 # SEAFLOW3D
 
 This repository contains the official implementation of our paper on stereo scene flow estimation.
@@ -10,6 +10,9 @@ This repository contains the official implementation of our paper on stereo scen
 
 If you find this project useful in your research, please consider citing our paper.
 
+
+## Run on ZED X
+<img width="2979" height="1646" alt="git" src="https://github.com/user-attachments/assets/364201cf-f229-4c61-bd81-a6b6513d15b6" />
 ## Environment
 
 The code has been tested with the following setup:
