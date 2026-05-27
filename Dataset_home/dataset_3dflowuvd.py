@@ -903,7 +903,7 @@ def quick_check_tartanair(dataset, max_samples=None, num_workers=8, log_file="ba
     return summary
 
 class MpiSintel(SceneFlowDataset):#/home/lh/RAFT-master/dataset/Sintel
-    def __init__(self, aug_params=None, split='training', root='/mnt/hdd/hanling/sceneflow_data/Sintel', dstype='clean',ifeval = 't_all'):
+    def __init__(self, aug_params=None, split='training', root='/home/lh/dataset/MPI-Sintel-complete', dstype='clean',ifeval = 't_all'):
         super(MpiSintel, self).__init__(aug_params, sparse=False)
         flow_root = osp.join(root, split, 'flow')
         image_root = osp.join(root, split, dstype)
@@ -1266,10 +1266,10 @@ def fetch_dataloader(args):
     elif args.stage == 'abtrain':#这个是用于消融实验的数据准备，em就用driving和一部分的Sintel吧
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
         #Tartan = TartanAirV2(aug_params)
-        thingsc = FlyingThings3D_subset(aug_params)
-
-
-        train_dataset = thingsc
+        #thingsc = FlyingThings3D_subset(aug_params)
+        sintelc = MpiSintel(aug_params,dstype='clean',ifeval = 't_train')
+        sintelf = MpiSintel(aug_params, dstype='final', ifeval='t_train')
+        train_dataset = sintelc+sintelf
     elif args.stage == 'fineting':
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
         driving = Driving(aug_params, split='training')
@@ -1289,7 +1289,7 @@ def fetch_dataloader(args):
     print('Training with %d image pairs' % len(train_dataset))
     return train_loader
 class Sintel_test(data.Dataset):
-    def __init__(self, aug_params=None, split='training', root='/mnt/hdd/hanling/sceneflow_data/Sintel', dstype='clean',ifeval = 't_all'):
+    def __init__(self, aug_params=None, split='training', root='/home/lh/dataset/MPI-Sintel-complete', dstype='clean',ifeval = 't_all'):
 
         self.extra_info= []
         self.flow_list = []

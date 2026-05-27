@@ -14,6 +14,7 @@ import torch.optim as optim
 from model_home.RFlow3D_MSabv4_2 import RFlow3D_MSab_v8
 from model_home.SEAFlow3D import SEAFLOW3D
 from model_home.SEAFlow3DP import SEAFLOW3DP
+from model_home.SEAFLOWrepair import SEAFLOWrepair
 import Dataset_home.dataset_3dflowuvd as datasets
 import RFlow3Dtest as evaluate
 from torch.utils.tensorboard import SummaryWriter
@@ -140,7 +141,7 @@ class Logger:
 
 def train(args):
 
-    model = nn.DataParallel(SEAFLOW3DP(args), device_ids=args.gpus)
+    model = nn.DataParallel(SEAFLOWrepair(args), device_ids=args.gpus)
     print("Parameter Count: %d" % count_parameters(model))
     if args.restore_ckpt is not None:
         model.load_state_dict(torch.load(args.restore_ckpt), strict=False)
@@ -182,8 +183,6 @@ def train(args):
             if total_steps % VAL_FREQ == VAL_FREQ - 1:
                 PATH = 'checkpoints/%d_%s.pth' % (total_steps + 1, args.name)
                 torch.save(model.state_dict(), PATH)
-
-                evaluate.validate_kitti(model.module)
                 evaluate.validate_sintel(model.module)
                 model.train()
             total_steps += 1
@@ -210,9 +209,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--lr', type=float, default=0.00025)
     parser.add_argument('--num_steps', type=int, default=120000)
-    parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--image_size', type=int, nargs='+', default=[480, 512])
-    parser.add_argument('--gpus', type=int, nargs='+', default=[0,1])
+    parser.add_argument('--batch_size', type=int, default=2)
+    parser.add_argument('--image_size', type=int, nargs='+', default=[320, 640])
+    parser.add_argument('--gpus', type=int, nargs='+', default=[0])
     parser.add_argument('--mixed_precision', action='store_true', help='use mixed precision')
 
     parser.add_argument('--iters', type=int, default=6)

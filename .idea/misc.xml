@@ -6,5 +6,5 @@
   <component name="MarkdownSettingsMigration">
     <option name="stateVersion" value="1" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Remote 3.9 (sftp://linghan@10.9.240.40:22/mnt/hdd/home/linghan/miniconda3/envs/seaflow3d/bin/python3)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="$PROJECT_DIR$/../miniconda3/envs/seaflow3d" project-jdk-type="Python SDK" />
 </project>
