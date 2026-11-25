@@ -21,6 +21,7 @@ from core.utils.flow_viz import flow2rgb,getvis
 from core.utils.bezier import mybezier
 from core.utils.rectangle_noise import retangle
 from core.utils import frame_utils
+from core.utils.depth_real_aug import augment_disparity_with_sam, load_sam_instance
 from matplotlib import cm
 import Dataset_home.flowio as flow_IO
 import  cv2
@@ -101,6 +102,71 @@ def disparity_loader(path):
         return data
     else:
         return readPFM(path)[0]
+
+KITTI_COLOR_INTRINSICS = np.array([721.5377, 721.5377, 609.5593, 172.8540], dtype=np.float32)
+
+def _read_kitti_intrinsics_file(calib_path, image=2):
+    if not osp.isfile(calib_path):
+        return None
+
+    data = {}
+    with open(calib_path, "r") as f:
+        for line in f:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            values = np.fromstring(value, sep=" ", dtype=np.float32)
+            if values.size > 0:
+                data[key.strip()] = values
+
+    for key in (f"K_{image:02d}", f"K{image}"):
+        values = data.get(key)
+        if values is not None and values.size >= 9:
+            K = values[:9].reshape(3, 3)
+            return np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=np.float32)
+
+    for key in (f"P_rect_{image:02d}", f"P_rect_{image}", f"P{image}", f"P_{image:02d}"):
+        values = data.get(key)
+        if values is not None and values.size >= 12:
+            P = values[:12].reshape(3, 4)
+            return np.array([P[0, 0], P[1, 1], P[0, 2], P[1, 2]], dtype=np.float32)
+
+    return None
+
+def _kitti_intrinsics_from_image(image_path, image=2):
+    scene_root = osp.dirname(osp.dirname(image_path))
+    frame_id = osp.basename(image_path).split("_")[0]
+    candidates = [
+        osp.join(scene_root, "calib_cam_to_cam", f"{frame_id}.txt"),
+        osp.join(scene_root, "calib", f"{frame_id}.txt"),
+        osp.join(scene_root, "calib_cam_to_cam.txt"),
+    ]
+
+    for calib_path in candidates:
+        intrinsics = _read_kitti_intrinsics_file(calib_path, image=image)
+        if intrinsics is not None:
+            return intrinsics
+
+    return KITTI_COLOR_INTRINSICS.copy()
+
+def _kitti_sam_path(image_path):
+    """Map KITTI image_2/<frame>.png to sam/image_2/<frame>.npz."""
+    split_root = osp.dirname(osp.dirname(image_path))
+    image_dir = osp.basename(osp.dirname(image_path))
+    frame_name = osp.splitext(osp.basename(image_path))[0] + ".npz"
+    return osp.join(split_root, "sam", image_dir, frame_name)
+
+def _require_equal_file_counts(dataset_name, **file_lists):
+    counts = {name: len(paths) for name, paths in file_lists.items()}
+    if not counts or min(counts.values()) == 0 or len(set(counts.values())) != 1:
+        raise RuntimeError(
+            "%s files are missing or misaligned: %s"
+            % (
+                dataset_name,
+                ", ".join("%s=%d" % item for item in sorted(counts.items())),
+            )
+        )
+
 from scipy.ndimage import  binary_dilation
 def get_neighbor_consistency_invalid_mask(
     arr,
@@ -180,6 +246,8 @@ class SceneFlowDataset(data.Dataset):
         self.stereo = False
         self.flow_list = []
         self.depth_list = []
+        self.sam_list = []
+        self.sam2_list = []
         self.image_list = []
         self.extra_info = []
         self.occ_list =[]
@@ -192,6 +260,116 @@ class SceneFlowDataset(data.Dataset):
         self.sintel = False
         self.tartanair = False
         self.last_image = np.random.randn(320,720,3)
+
+        self.use_depth_real_aug = False
+        self.depth_real_aug_prob = 1.0
+        self.depth_real_aug_warn_limit = 8
+        self._depth_real_aug_warn_count = 0
+        self.use_rgb_sam_erase_aug = False
+        self.rgb_sam_erase_aug_prob = 0.5
+        self.rgb_sam_erase_num_instances = (2, 5)
+        self.rgb_sam_erase_min_region_area = 128
+        self.rgb_sam_erase_warn_limit = 8
+        self._rgb_sam_erase_warn_count = 0
+
+    def _warn_depth_real_aug(self, msg):
+        if self._depth_real_aug_warn_count < self.depth_real_aug_warn_limit:
+            print("[depth_real_aug] %s" % msg, flush=True)
+        self._depth_real_aug_warn_count += 1
+
+    def _warn_rgb_sam_erase_aug(self, msg):
+        if self._rgb_sam_erase_warn_count < self.rgb_sam_erase_warn_limit:
+            print("[rgb_sam_erase_aug] %s" % msg, flush=True)
+        self._rgb_sam_erase_warn_count += 1
+
+    def _maybe_apply_depth_real_aug(self, index, disparity, rgb, sam_list):
+        if not self.use_depth_real_aug:
+            return disparity
+
+        if np.random.rand() >= self.depth_real_aug_prob:
+            return disparity
+
+        if len(sam_list) <= index:
+            return disparity
+
+        sam_path = sam_list[index]
+        if sam_path is None:
+            return disparity
+
+        sam_path = os.fspath(sam_path)
+        if not osp.isfile(sam_path):
+            return disparity
+
+        try:
+            return augment_disparity_with_sam(
+                sam_path,
+                disparity,
+                rgb,
+                rng=np.random,
+            )
+        except Exception as exc:
+            self._warn_depth_real_aug("skip %s: %s" % (sam_path, exc))
+            return disparity
+
+    def _maybe_apply_rgb_sam_erase_aug(self, index, rgb, sam_list):
+        if not self.use_rgb_sam_erase_aug:
+            return rgb
+
+        if np.random.rand() >= self.rgb_sam_erase_aug_prob:
+            return rgb
+
+        if len(sam_list) <= index:
+            return rgb
+
+        sam_path = sam_list[index]
+        if sam_path is None:
+            return rgb
+
+        sam_path = os.fspath(sam_path)
+        if not osp.isfile(sam_path):
+            return rgb
+
+        try:
+            inst = load_sam_instance(sam_path)
+            return self._erase_rgb_texture_with_sam(inst, rgb)
+        except Exception as exc:
+            self._warn_rgb_sam_erase_aug("skip %s: %s" % (sam_path, exc))
+            return rgb
+
+    def _erase_rgb_texture_with_sam(self, sam_instance, rgb):
+        image = np.asarray(rgb)
+        if image.ndim != 3 or image.shape[2] < 3:
+            return rgb
+
+        out = image.copy()
+        h, w = out.shape[:2]
+        inst = np.asarray(sam_instance)
+        if inst.ndim == 3:
+            inst = inst[..., 0]
+        if inst.shape[:2] != (h, w):
+            inst = cv2.resize(inst.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST).astype(np.int64)
+
+        ids, counts = np.unique(inst, return_counts=True)
+        keep = (ids != 0) & (counts >= int(self.rgb_sam_erase_min_region_area))
+        ids = ids[keep]
+        counts = counts[keep]
+        if ids.size == 0:
+            return rgb
+
+        weights = counts.astype(np.float64)
+        weights = weights / max(weights.sum(), 1.0)
+        lo, hi = self.rgb_sam_erase_num_instances
+        num_instances = int(np.random.randint(int(lo), int(hi) + 1))
+        num_instances = min(num_instances, ids.size)
+        selected_ids = np.random.choice(ids, size=num_instances, replace=False, p=weights)
+
+        for region_id in selected_ids:
+            region_mask = inst == region_id
+            mean_color = out[region_mask, :3].reshape(-1, 3).mean(axis=0)
+            out[region_mask, :3] = mean_color
+
+        return out.astype(rgb.dtype, copy=False)
+
     def __getitem__(self, index):
 
         if not self.init_seed:
@@ -252,7 +430,8 @@ class SceneFlowDataset(data.Dataset):
         else:
             img1 = img1[..., :3]
             img2 = img2[..., :3]
-
+        d2 = self._maybe_apply_depth_real_aug(index, d2, img2, self.sam2_list)
+        img2 = self._maybe_apply_rgb_sam_erase_aug(index, img2, self.sam2_list)
         if self.sparse:#光流和深度变化率是两个独立的掩膜
             img1, img2, flow,d1,d2,dd1,intrinsics,valid= self.augmentor(img1, img2, flow,d1,d2,dd1,intrinsics,valid)
         else:
@@ -267,10 +446,9 @@ class SceneFlowDataset(data.Dataset):
         plt.show()
         plt.imshow(d1)
         plt.show()
-        plt.imshow(dd1)
+        plt.imshow(d2)
         plt.show()
         dz = dd1-d1
-        dz[dz>2]=0
         plt.imshow(dz)
         plt.show()
         '''
@@ -287,13 +465,15 @@ class SceneFlowDataset(data.Dataset):
         if valid is not None:
             valid = torch.from_numpy(valid).float()
         else:
-            valid = (flow[0].abs() < 1000) & (flow[1].abs() < 1000)
+            valid = ((flow[0].abs() < 1000) & (flow[1].abs() < 1000)).float()
         return img1, img2, flow, d1, d2, dz,intrinsics,valid
 
     def __rmul__(self, v):
         self.flow_list = v * self.flow_list
         self.image_list = v * self.image_list
         self.depth_list = v * self.depth_list
+        self.sam_list = v * self.sam_list
+        self.sam2_list = v * self.sam2_list
         self.occ_list = v * self.occ_list
         self.calib = v * self.calib
         return self
@@ -301,15 +481,20 @@ class SceneFlowDataset(data.Dataset):
         return len(self.image_list)
 
 class FlyingThings3D(SceneFlowDataset):
-    def __init__(self, aug_params=None, root='/media/lh/lh4t/flow3d_data/flyingthings/flyingthings/', dstype='frames_cleanpass'):
+    def __init__(self, aug_params=None, root='datasets/FlyingThings3D', dstype='frames_cleanpass'):
         super(FlyingThings3D, self).__init__(aug_params, sparse=False)
-        exclude = np.loadtxt('/home/lh/CSCV_occ/exclude.txt', delimiter=' ', dtype=np.unicode_)
-        exclude = set(exclude)
+        exclude_path = osp.join(root, 'exclude.txt')
+        if osp.isfile(exclude_path):
+            exclude = set(np.atleast_1d(np.loadtxt(
+                exclude_path, delimiter=' ', dtype=str)).tolist())
+        else:
+            exclude = set()
         self.things = True
         for cam in ['left','right']:
             for direction in ['into_future', 'into_past']:
                 image_dirs = sorted(glob(osp.join(root, dstype, 'TRAIN/*/*')))
                 image_dirs = sorted([osp.join(f, cam) for f in image_dirs])
+                sam_root = osp.join(root, 'sam', dstype, 'TRAIN')
 
                 d0_dirs = sorted(glob(osp.join(root, 'disparity/TRAIN/*/*')))
                 d0_dirs = sorted([osp.join(f, cam) for f in d0_dirs])
@@ -321,25 +506,33 @@ class FlyingThings3D(SceneFlowDataset):
                 flow_dirs = sorted([osp.join(f, direction, cam) for f in flow_dirs])
 
                 for idir, fdir,d0dir,dcdir in zip(image_dirs, flow_dirs,d0_dirs,dc_dirs):
+                    samdir = osp.join(sam_root, idir.split('/')[-3], idir.split('/')[-2], cam)
                     images = sorted(glob(osp.join(idir, '*.png')))
+                    sams = sorted(glob(osp.join(samdir, '*.npz')))
+                    if len(sams) != len(images):
+                        sams = [osp.join(samdir, '%s.npz' % osp.splitext(osp.basename(image))[0]) for image in images]
                     flows = sorted(glob(osp.join(fdir, '*.pfm')))
                     d0s = sorted(glob(osp.join(d0dir, '*.pfm')))
                     dcs = sorted(glob(osp.join(dcdir, '*.pfm')))
                     for i in range(len(flows) - 1):
                         tag = '/'.join(images[i].split('/')[-5:])
                         if tag in exclude:
-                            print("Excluding %s" % tag)
+                            #print("Excluding %s" % tag)
                             continue
                         if direction == 'into_future':
                             self.image_list += [[images[i], images[i + 1]]]
                             self.flow_list += [flows[i]]
                             self.depth_list += [[d0s[i],d0s[i+1], dcs[i]]]
+                            self.sam_list += [sams[i]]
+                            self.sam2_list += [sams[i + 1]]
                             frame_id = images[i].split('/')[-1]
                             self.extra_info += [[frame_id]]
                         elif direction == 'into_past':
                             self.image_list += [[images[i + 1], images[i]]]
                             self.flow_list += [flows[i + 1]]
                             self.depth_list += [[d0s[i+1],d0s[i], dcs[i+1]]]
+                            self.sam_list += [sams[i + 1]]
+                            self.sam2_list += [sams[i]]
                             frame_id = images[i+1].split('/')[-1]
                             self.extra_info += [[frame_id]]
 
@@ -359,11 +552,152 @@ def stem(path):
     return osp.splitext(osp.basename(path))[0]
 def make_dict(file_list):
     return {stem(f): f for f in file_list}
+
+def _path_tail(path, n):
+    return '/'.join(osp.normpath(path).replace('\\', '/').split('/')[-n:])
+
+class FlyingThings3D_test(data.Dataset):
+    def __init__(
+        self,
+        root='datasets/FlyingThings3D',
+        split='TEST',
+        dstype='frames_cleanpass',
+        cameras=('left', 'right'),
+        directions=('into_future', 'into_past'),
+        max_samples=100,
+        sample_stride=1,
+        sample_start=0,
+        exclude_file=None,
+    ):
+        self.extra_info = []
+        self.flow_list = []
+        self.image_list = []
+        self.depth_list = []
+        self.things = True
+
+        split = split.upper()
+        if isinstance(cameras, str):
+            cameras = [x.strip() for x in cameras.split(',') if x.strip()]
+        if isinstance(directions, str):
+            directions = [x.strip() for x in directions.split(',') if x.strip()]
+
+        exclude = set()
+        if exclude_file is not None and osp.isfile(exclude_file):
+            loaded = np.loadtxt(exclude_file, delimiter=' ', dtype=str)
+            if np.ndim(loaded) == 0:
+                loaded = [str(loaded)]
+            exclude = set(loaded)
+
+        for cam in cameras:
+            for direction in directions:
+                image_dirs = sorted(glob(osp.join(root, dstype, f'{split}/*/*')))
+                image_dirs = sorted([osp.join(f, cam) for f in image_dirs])
+
+                d0_dirs = sorted(glob(osp.join(root, f'disparity/{split}/*/*')))
+                d0_dirs = sorted([osp.join(f, cam) for f in d0_dirs])
+
+                dc_dirs = sorted(glob(osp.join(root, f'disparity_change/{split}/*/*')))
+                dc_dirs = sorted([osp.join(f, direction, cam) for f in dc_dirs])
+
+                flow_dirs = sorted(glob(osp.join(root, f'optical_flow/{split}/*/*')))
+                flow_dirs = sorted([osp.join(f, direction, cam) for f in flow_dirs])
+
+                for idir, fdir, d0dir, dcdir in zip(image_dirs, flow_dirs, d0_dirs, dc_dirs):
+                    if not (osp.isdir(idir) and osp.isdir(fdir) and osp.isdir(d0dir) and osp.isdir(dcdir)):
+                        continue
+
+                    images = sorted(glob(osp.join(idir, '*.png')))
+                    flows = sorted(glob(osp.join(fdir, '*.pfm')))
+                    d0s = sorted(glob(osp.join(d0dir, '*.pfm')))
+                    dcs = sorted(glob(osp.join(dcdir, '*.pfm')))
+                    pair_count = min(len(images) - 1, len(flows) - 1, len(d0s) - 1, len(dcs) - 1)
+
+                    for i in range(max(pair_count, 0)):
+                        if direction == 'into_future':
+                            tag = _path_tail(images[i], 5)
+                            if tag in exclude:
+                                continue
+                            self.image_list += [[images[i], images[i + 1]]]
+                            self.flow_list += [flows[i]]
+                            self.depth_list += [[d0s[i], d0s[i + 1], dcs[i]]]
+                            self.extra_info += [[split, cam, direction, _path_tail(images[i], 5)]]
+                        elif direction == 'into_past':
+                            tag = _path_tail(images[i + 1], 5)
+                            if tag in exclude:
+                                continue
+                            self.image_list += [[images[i + 1], images[i]]]
+                            self.flow_list += [flows[i + 1]]
+                            self.depth_list += [[d0s[i + 1], d0s[i], dcs[i + 1]]]
+                            self.extra_info += [[split, cam, direction, _path_tail(images[i + 1], 5)]]
+
+        total_samples = len(self.image_list)
+        sample_start = max(int(sample_start), 0)
+        sample_stride = max(int(sample_stride), 1)
+        max_samples = int(max_samples) if max_samples is not None else 0
+
+        items = list(zip(self.image_list, self.flow_list, self.depth_list, self.extra_info))
+        items = items[sample_start::sample_stride]
+        if max_samples > 0:
+            items = items[:max_samples]
+
+        if items:
+            self.image_list, self.flow_list, self.depth_list, self.extra_info = map(list, zip(*items))
+        else:
+            self.image_list, self.flow_list, self.depth_list, self.extra_info = [], [], [], []
+
+        print(
+            f"FlyingThings3D_test split={split} dstype={dstype} "
+            f"samples={len(self.image_list)} total={total_samples} "
+            f"start={sample_start} stride={sample_stride} max={max_samples}"
+        )
+
+    def __len__(self):
+        return len(self.image_list)
+
+    def get_dc(self, index):
+        d1 = np.abs(disparity_loader(self.depth_list[index][0])).astype(np.float32)
+        d2 = np.abs(disparity_loader(self.depth_list[index][1])).astype(np.float32)
+        d3 = np.abs(disparity_loader(self.depth_list[index][2])).astype(np.float32) + d1
+        intrinsics = np.array([1050, 1050, 479.5, 269.5], dtype=np.float32)
+        return d1, d2, d3, intrinsics
+
+    def __getitem__(self, index):
+        index = index % len(self.image_list)
+        d1, d2, dd1, intrinsics = self.get_dc(index)
+
+        flow = frame_utils.read_gen(self.flow_list[index])
+        img1 = frame_utils.read_gen(self.image_list[index][0])
+        img2 = frame_utils.read_gen(self.image_list[index][1])
+
+        flow = np.array(flow).astype(np.float32)
+        img1 = np.array(img1).astype(np.uint8)
+        img2 = np.array(img2).astype(np.uint8)
+
+        if len(img1.shape) == 2:
+            img1 = np.tile(img1[..., None], (1, 1, 3))
+            img2 = np.tile(img2[..., None], (1, 1, 3))
+        else:
+            img1 = img1[..., :3]
+            img2 = img2[..., :3]
+
+        img1 = torch.from_numpy(img1).permute(2, 0, 1).float()
+        img2 = torch.from_numpy(img2).permute(2, 0, 1).float()
+        flow = torch.from_numpy(flow).permute(2, 0, 1).float()
+
+        intrinsics = torch.from_numpy(intrinsics).float()
+        d1 = torch.from_numpy(d1[np.newaxis, :, :]).float()
+        d2 = torch.from_numpy(d2[np.newaxis, :, :]).float()
+        dz = torch.from_numpy(dd1[np.newaxis, :, :]).float() - d1
+        valid = torch.isfinite(flow[0]) & torch.isfinite(flow[1])
+        valid = valid & (flow[0].abs() < 1000) & (flow[1].abs() < 1000)
+        valid = valid.float()
+        return img1, img2, flow, d1, d2, dz, intrinsics, valid
+
 class FlyingThings3D_subset(SceneFlowDataset):
     def __init__(
         self,
         aug_params=None,
-        root='/mnt/hdd/hanling/sceneflow_data/FlyingThings3D_subset/FlyingThings3D_subset',
+        root='datasets/FlyingThings3D_subset',
         split='train',
         image_dirname='image_clean',
         flow_dirname='flow',
@@ -375,7 +709,7 @@ class FlyingThings3D_subset(SceneFlowDataset):
 
         exclude = set()
         if exclude_file is not None:
-            exclude = np.loadtxt(exclude_file, delimiter=' ', dtype=np.unicode_)
+            exclude = np.loadtxt(exclude_file, delimiter=' ', dtype=str)
             if np.ndim(exclude) == 0:
                 exclude = [str(exclude)]
             exclude = set(exclude)
@@ -479,7 +813,7 @@ class FlyingThings3D_subset(SceneFlowDataset):
 
         return d1, d2, d3, intrinsics
 class MonkeyD(SceneFlowDataset):
-    def __init__(self, aug_params=None,root='/media/lh/lh4t/flow3d_data/Monkey'):
+    def __init__(self, aug_params=None, root='datasets/Monkey'):
         super(MonkeyD, self).__init__(aug_params, sparse=False)
         self.calib = []
         self.monkey = True
@@ -518,7 +852,7 @@ class MonkeyD(SceneFlowDataset):
         else:
             fl = 1050
         H,W = d1.shape
-        fx, fy, cx, cy = (fl, fl, W/2.0, H/2.0)
+        fx, fy, cx, cy = (fl, fl, (W - 1) / 2.0, (H - 1) / 2.0)
         intrinsics = np.array([fx, fy, cx, cy])
         s = 0.5 +  np.random.rand()
         d1 = s*d1
@@ -526,7 +860,7 @@ class MonkeyD(SceneFlowDataset):
         d3 = s*d3
         return d1,d2,d3,intrinsics
 class Driving(SceneFlowDataset):
-    def __init__(self, aug_params=None,  split='training',root='/mnt/hdd/hanling/sceneflow_data/Driving'):
+    def __init__(self, aug_params=None, split='training', root='datasets/Driving'):
         super(Driving, self).__init__(aug_params, sparse=False)
         self.calib = []
         self.occlusion = False
@@ -549,10 +883,15 @@ class Driving(SceneFlowDataset):
                 im_path = flow_path.replace('/into_future/', '/').replace('/into_past/', '/').replace('optical_flow','frames_cleanpass')
                 im0_path = '%s/%s.png' % (im_path.rsplit('/', 1)[0], idd)
                 im1_path = '%s/%s.png' % (im_path.rsplit('/', 1)[0], idd_p1)
+                sam_path = im_path.replace('frames_cleanpass', 'sam')
+                sam_path = '%s/%s.npz' % (sam_path.rsplit('/', 1)[0], idd)
+                sam2_path = '%s/%s.npz' % (sam_path.rsplit('/', 1)[0], idd_p1)
                 frame_id = im1_path.split('/')[-1]
                 self.extra_info += [[frame_id]]
                 #calib.append('%s/camera_data.txt' % (im0_path.replace('frames_cleanpass', 'camera_data').rsplit('/', 2)[0]))
                 self.flow_list += [flow_path]
+                self.sam_list += [sam_path]
+                self.sam2_list += [sam2_path]
                 self.image_list += [[im0_path,im1_path]]
                 self.depth_list += [[d0_path,d1_path,dc_path]]
                 self.calib +=['%s/camera_data.txt' % (im0_path.replace('frames_cleanpass', 'camera_data').rsplit('/', 2)[0])]
@@ -568,7 +907,7 @@ class Driving(SceneFlowDataset):
             fl = 1050
 
         H,W = d1.shape
-        fx, fy, cx, cy = (fl, fl, W/2.0, H/2.0)
+        fx, fy, cx, cy = (fl, fl, (W - 1) / 2.0, (H - 1) / 2.0)
         intrinsics = np.array([fx, fy, cx, cy])
         s = 0.1 + 0.4 * np.random.rand()
         d1 = s*d1
@@ -577,12 +916,70 @@ class Driving(SceneFlowDataset):
 
 
         return d1,d2,d3,intrinsics
+class Driving_m(SceneFlowDataset):
+    def __init__(self, aug_params=None, split='training', root='datasets/Driving'):
+        super(Driving_m, self).__init__(aug_params, sparse=False)
+        self.calib = []
+        self.occlusion = False
+        self.driving = True
+        level_stars = '/*' * 6
+        candidate_pool = glob('%s/optical_flow%s' % (root, level_stars))
+        for flow_path in sorted(candidate_pool):
+            if flow_path.replace('\\', '/').split('/')[-2] != 'left':
+                continue
+            idd = flow_path.split('/')[-1].split('_')[-2]
+            if 'into_future' in flow_path:
+                idd_p1 = '%04d' % (int(idd) + 1)
+            else:
+                idd_p1 = '%04d' % (int(idd) - 1)
+            if os.path.exists(flow_path.replace(idd, idd_p1)):
+                d0_path = flow_path.replace('/into_future/', '/').replace('/into_past/', '/').replace('optical_flow','disparity_m')
+                d0_path = '%s/%s.pfm' % (d0_path.rsplit('/', 1)[0], idd)
+                d1_path = '%s/%s.pfm' % (d0_path.rsplit('/', 1)[0], idd_p1)
 
+                dc_path = flow_path.replace('optical_flow', 'disparity_change')
+                dc_path = '%s/%s.pfm' % (dc_path.rsplit('/', 1)[0], idd)
+                im_path = flow_path.replace('/into_future/', '/').replace('/into_past/', '/').replace('optical_flow','frames_cleanpass')
+                im0_path = '%s/%s.png' % (im_path.rsplit('/', 1)[0], idd)
+                im1_path = '%s/%s.png' % (im_path.rsplit('/', 1)[0], idd_p1)
+                sam_path = im_path.replace('frames_cleanpass', 'sam')
+                sam_path = '%s/%s.npz' % (sam_path.rsplit('/', 1)[0], idd)
+                sam2_path = '%s/%s.npz' % (sam_path.rsplit('/', 1)[0], idd_p1)
+                frame_id = im1_path.split('/')[-1]
+                self.extra_info += [[frame_id]]
+                #calib.append('%s/camera_data.txt' % (im0_path.replace('frames_cleanpass', 'camera_data').rsplit('/', 2)[0]))
+                self.flow_list += [flow_path]
+                self.sam_list += [sam_path]
+                self.sam2_list += [sam2_path]
+                self.image_list += [[im0_path,im1_path]]
+                self.depth_list += [[d0_path,d1_path,dc_path]]
+                self.calib +=['%s/camera_data.txt' % (im0_path.replace('frames_cleanpass', 'camera_data').rsplit('/', 2)[0])]
+
+    def get_dc(self,index):#获取第一帧深度，第二帧深度，还有第一帧的变化深度,再来个内参
+        d1 = np.abs(disparity_loader(self.depth_list[index][0]))
+        d2 = np.abs(disparity_loader(self.depth_list[index][1]))
+        d3 = np.abs(disparity_loader(self.depth_list[index][2])+d1)
+
+        if '15mm_' in self.calib[index]:
+            fl = 450  # 450
+        else:
+            fl = 1050
+
+        H,W = d1.shape
+        fx, fy, cx, cy = (fl, fl, (W - 1) / 2.0, (H - 1) / 2.0)
+        intrinsics = np.array([fx, fy, cx, cy])
+        s = 0.1 + 0.4 * np.random.rand()
+        d1 = s*d1
+        d2 = s*d2
+        d3 = s*d3
+
+
+        return d1,d2,d3,intrinsics
 class TartanAirV2(SceneFlowDataset):
     def  __init__(
         self,
         aug_params=None,
-        root='/mnt/hdd/hanling/sceneflow_data/tartanair_v2',
+        root='datasets/TartanAirV2',
         difficulties=('Data_easy', 'Data_hard'),
         trajectory_glob='P*',
         image_folder='image_lcam_front',
@@ -902,11 +1299,12 @@ def quick_check_tartanair(dataset, max_samples=None, num_workers=8, log_file="ba
 
     return summary
 
-class MpiSintel(SceneFlowDataset):#/home/lh/RAFT-master/dataset/Sintel
-    def __init__(self, aug_params=None, split='training', root='/home/lh/dataset/MPI-Sintel-complete', dstype='clean',ifeval = 't_all'):
+class MpiSintel(SceneFlowDataset):
+    def __init__(self, aug_params=None, split='training', root='datasets/Sintel', dstype='clean',ifeval = 't_all'):
         super(MpiSintel, self).__init__(aug_params, sparse=False)
         flow_root = osp.join(root, split, 'flow')
         image_root = osp.join(root, split, dstype)
+        sam_root = osp.join(root, split, 'sam', dstype)
         depth_root = osp.join(root, split, 'depth')
         occ_root = osp.join(root, split, 'occlusions')
         self.calib = []
@@ -921,10 +1319,15 @@ class MpiSintel(SceneFlowDataset):#/home/lh/RAFT-master/dataset/Sintel
             for scene in os.listdir(image_root):
                 if scene in ['temple_2','market_6','cave_4','ambush_5','bamboo_1']:
                     image_list = sorted(glob(osp.join(image_root, scene, '*.png')))
+                    sam_list = sorted(glob(osp.join(sam_root, scene, '*.npz')))
                     depth_list = sorted(glob(osp.join(depth_root, scene, '*.dpt')))
                     occ_list = sorted(glob(osp.join(occ_root, scene, '*.png')))
                     for i in range(len(image_list) - 1):
+                        sam_path = osp.join(sam_root, scene, '%s.npz' % osp.splitext(osp.basename(image_list[i]))[0])
+                        sam2_path = osp.join(sam_root, scene, '%s.npz' % osp.splitext(osp.basename(image_list[i + 1]))[0])
                         self.image_list += [[image_list[i], image_list[i + 1]]]
+                        self.sam_list += [sam_path]
+                        self.sam2_list += [sam2_path]
                         if split != 'test':
                             self.depth_list += [[depth_list[i], depth_list[i + 1]]]
                         self.extra_info += [(scene, i)]  # scene and frame_id
@@ -939,10 +1342,15 @@ class MpiSintel(SceneFlowDataset):#/home/lh/RAFT-master/dataset/Sintel
             for scene in os.listdir(image_root):
                 if scene not in ['temple_2','market_6','cave_4','ambush_5','bamboo_1']:
                     image_list = sorted(glob(osp.join(image_root, scene, '*.png')))
+                    sam_list = sorted(glob(osp.join(sam_root, scene, '*.npz')))
                     depth_list = sorted(glob(osp.join(depth_root, scene, '*.dpt')))
                     occ_list = sorted(glob(osp.join(occ_root, scene, '*.png')))
                     for i in range(len(image_list) - 1):
+                        sam_path = osp.join(sam_root, scene, '%s.npz' % osp.splitext(osp.basename(image_list[i]))[0])
+                        sam2_path = osp.join(sam_root, scene, '%s.npz' % osp.splitext(osp.basename(image_list[i + 1]))[0])
                         self.image_list += [[image_list[i], image_list[i + 1]]]
+                        self.sam_list += [sam_path]
+                        self.sam2_list += [sam2_path]
                         if split != 'test':
                             self.depth_list += [[depth_list[i], depth_list[i + 1]]]
                         self.extra_info += [(scene, i)]  # scene and frame_id
@@ -954,10 +1362,15 @@ class MpiSintel(SceneFlowDataset):#/home/lh/RAFT-master/dataset/Sintel
         else:
             for scene in os.listdir(image_root):
                 image_list = sorted(glob(osp.join(image_root, scene, '*.png')))
+                sam_list = sorted(glob(osp.join(sam_root, scene, '*.npz')))
                 depth_list = sorted(glob(osp.join(depth_root, scene, '*.dpt')))
                 occ_list = sorted(glob(osp.join(occ_root, scene, '*.png')))
                 for i in range(len(image_list) - 1):
+                    sam_path = osp.join(sam_root, scene, '%s.npz' % osp.splitext(osp.basename(image_list[i]))[0])
+                    sam2_path = osp.join(sam_root, scene, '%s.npz' % osp.splitext(osp.basename(image_list[i + 1]))[0])
                     self.image_list += [[image_list[i], image_list[i + 1]]]
+                    self.sam_list += [sam_path]
+                    self.sam2_list += [sam2_path]
                     if split != 'test':
                         self.depth_list += [[depth_list[i], depth_list[i + 1]]]
                     self.extra_info += [(scene, i)]  # scene and frame_id
@@ -985,7 +1398,7 @@ class MpiSintel(SceneFlowDataset):#/home/lh/RAFT-master/dataset/Sintel
         depth3 = (torch.nn.functional.grid_sample(depth2, frepb,align_corners=True,mode='nearest').view(h, w))
         depth3 = depth3.view(h, w)
         H, W = depth1.shape
-        fx, fy, cx, cy = (1050, 1050, W/2.0, H/2.0)
+        fx, fy, cx, cy = (1050, 1050, (W - 1) / 2.0, (H - 1) / 2.0)
         intrinsics = np.array([fx, fy, cx, cy])
         vaild = 1-occ.numpy()
         disp1 = 360/depth1.numpy()
@@ -995,7 +1408,7 @@ class MpiSintel(SceneFlowDataset):#/home/lh/RAFT-master/dataset/Sintel
         disp3[vaild<1 + inf_mask] = 10000
         return disp1,disp2,disp3,intrinsics
 class Spring(SceneFlowDataset):
-    def __init__(self, aug_params=None,  split='train',root='/media/lh/lh4t/flow3d_data/spring/spring'):
+    def __init__(self, aug_params=None, split='train', root='datasets/Spring'):
         super(Spring, self).__init__(aug_params, sparse=True)
         self.calib = []
         self.occlusion = False
@@ -1042,7 +1455,7 @@ class Spring(SceneFlowDataset):
         d3 = np.abs(flow_IO.readDispFile(self.depth_list[index][2]))[::2, ::2]
 
         fx, fy, cx, cy = self.calib[index]
-        intrinsics = np.array([fx, fy, cx, cy])
+        intrinsics = np.array([0.5 * fx, 0.5 * fy, 0.5 * cx, 0.5 * cy])
         s = 0.4 + 0.2 * np.random.rand()
         d1 = s*d1
         d2 = s*d2
@@ -1051,7 +1464,7 @@ class Spring(SceneFlowDataset):
 
         return d1,d2,d3,intrinsics
 class vkitti(SceneFlowDataset):
-    def __init__(self, aug_params=None,  split='training',root='/home/lh/all_datasets/vkitti'):
+    def __init__(self, aug_params=None, split='training', root='datasets/VKITTI2'):
         super(vkitti, self).__init__(aug_params, sparse=True)
         self.calib = []
         self.occlusion = False
@@ -1061,6 +1474,8 @@ class vkitti(SceneFlowDataset):
         flow_list = []
         image_list = []
         depth_list = []
+        sam_list = []
+        sam2_list = []
         calib_l = []
 
         for flow_path in sorted(candidate_all):
@@ -1074,28 +1489,34 @@ class vkitti(SceneFlowDataset):
                 d0_path = '%s/depth_%s.png' % (d0_path.rsplit('/', 1)[0], idd)
                 d1_path = '%s/depth_%s.png' % (d0_path.rsplit('/', 1)[0], idd_p1)
 
-                Scene_path = flow_path.replace('Flow', 'SceneFlow').replace('flow', 'sceneFlow')
+                Scene_path = flow_path.replace('Flow', 'SceneFlow').replace('flow_0', 'sceneFlow_0')
 
                 im_path = flow_path.replace('backwardFlow', 'rgb').replace('forwardFlow', 'rgb')
                 im0_path = '%s/rgb_%s.jpg' % (im_path.rsplit('/', 1)[0], idd)
                 im1_path = '%s/rgb_%s.jpg' % (im_path.rsplit('/', 1)[0], idd_p1)
+                sam_path = flow_path.replace('backwardFlow', 'sam').replace('forwardFlow', 'sam')
+                sam_path = '%s/rgb_%s.npz' % (sam_path.rsplit('/', 1)[0], idd)
+                sam2_path = '%s/rgb_%s.npz' % (sam_path.rsplit('/', 1)[0], idd_p1)
                 frame_id = im1_path.split('/')[-1]
                 extra_info += [[frame_id]]
                 #calib.append('%s/camera_data.txt' % (im0_path.replace('frames_cleanpass', 'camera_data').rsplit('/', 2)[0]))
                 flow_list += [flow_path]
                 image_list += [[im0_path,im1_path]]
                 depth_list += [[d0_path,d1_path,Scene_path]]
+                sam_list += [sam_path]
+                sam2_list += [sam2_path]
 
                 calib_list = np.loadtxt(im0_path.split("frames")[0]+'intrinsic.txt', skiprows=1)
                 calib_l += [calib_list[int(idd)][2:]]
 
 
         for idx in range(len(image_list)):
-            if idx % 5 != 0:
                 self.extra_info.append(extra_info[idx])
                 self.flow_list.append(flow_list[idx])
                 self.image_list.append(image_list[idx])
                 self.depth_list.append(depth_list[idx])
+                self.sam_list.append(sam_list[idx])
+                self.sam2_list.append(sam2_list[idx])
                 self.calib.append(calib_l[idx])
 
 
@@ -1119,8 +1540,117 @@ class vkitti(SceneFlowDataset):
         d3[not_use1] = 10000
 
         return d1,d2,d3,intrinsics
-class KITTI(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/home/xuxian/RAFT3D/datasets'
-    def __init__(self, aug_params=None, split='training', root='/mnt/hdd/hanling/sceneflow_data'):
+class vkitti_m(SceneFlowDataset):
+    def __init__(self, aug_params=None, split='training', root='datasets/VKITTI2'):
+        super(vkitti_m, self).__init__(aug_params, sparse=True)
+        self.calib = []
+        self.baseline = []
+        self.occlusion = False
+        self.vkitti = True
+        candidate_all = glob('%s/Scene*/*/*/*wardFlow/*/*.png' % (root))
+        extra_info = []
+        flow_list = []
+        image_list = []
+        depth_list = []
+        sam_list = []
+        sam2_list = []
+        calib_l = []
+        baseline_l = []
+        intrinsic_cache = {}
+        extrinsic_cache = {}
+
+        for flow_path in sorted(candidate_all):
+            if flow_path.replace('\\', '/').split('/')[-2] != 'Camera_0':
+                continue
+            idd = flow_path.split('/')[-1].split('_')[-1].split('.')[-2]
+            if 'forward' in flow_path:
+                idd_p1 = '%05d' % (int(idd) + 1)
+            else:
+                idd_p1 = '%05d' % (int(idd) - 1)
+            if os.path.exists(flow_path.replace(idd, idd_p1)):
+                d0_path = flow_path.replace('backwardFlow', 'disp_m').replace('forwardFlow', 'disp_m')
+                d0_path = '%s/disp_%s.pfm' % (d0_path.rsplit('/', 1)[0], idd)
+                d1_path = '%s/disp_%s.pfm' % (d0_path.rsplit('/', 1)[0], idd_p1)
+                depth0_path = flow_path.replace('backwardFlow', 'depth').replace('forwardFlow', 'depth')
+                depth0_path = '%s/depth_%s.png' % (depth0_path.rsplit('/', 1)[0], idd)
+
+                Scene_path = flow_path.replace('Flow', 'SceneFlow').replace('flow_0', 'sceneFlow_0')
+
+                im_path = flow_path.replace('backwardFlow', 'rgb').replace('forwardFlow', 'rgb')
+                im0_path = '%s/rgb_%s.jpg' % (im_path.rsplit('/', 1)[0], idd)
+                im1_path = '%s/rgb_%s.jpg' % (im_path.rsplit('/', 1)[0], idd_p1)
+                sam_path = flow_path.replace('backwardFlow', 'sam').replace('forwardFlow', 'sam')
+                sam_path = '%s/rgb_%s.npz' % (sam_path.rsplit('/', 1)[0], idd)
+                sam2_path = '%s/rgb_%s.npz' % (sam_path.rsplit('/', 1)[0], idd_p1)
+                frame_id = im1_path.split('/')[-1]
+                extra_info += [[frame_id]]
+                #calib.append('%s/camera_data.txt' % (im0_path.replace('frames_cleanpass', 'camera_data').rsplit('/', 2)[0]))
+                flow_list += [flow_path]
+                image_list += [[im0_path,im1_path]]
+                depth_list += [[d0_path,d1_path,Scene_path,depth0_path]]
+                sam_list += [sam_path]
+                sam2_list += [sam2_path]
+
+                seq_root = im0_path.split("frames")[0]
+                if seq_root not in intrinsic_cache:
+                    intrinsic_cache[seq_root] = np.loadtxt(seq_root + 'intrinsic.txt', skiprows=1)
+                if seq_root not in extrinsic_cache:
+                    extrinsic_cache[seq_root] = np.loadtxt(seq_root + 'extrinsic.txt', skiprows=1)
+
+                calib_list = intrinsic_cache[seq_root]
+                calib_l += [calib_list[int(idd)][2:]]
+                extrinsic = extrinsic_cache[seq_root]
+                ext0 = extrinsic[(extrinsic[:, 0] == int(idd)) & (extrinsic[:, 1] == 0)]
+                ext1 = extrinsic[(extrinsic[:, 0] == int(idd)) & (extrinsic[:, 1] == 1)]
+                if len(ext0) > 0 and len(ext1) > 0:
+                    t0 = ext0[0, [5, 9, 13]]
+                    t1 = ext1[0, [5, 9, 13]]
+                    baseline_l += [100.0 * np.linalg.norm(t0 - t1)]
+                else:
+                    baseline_l += [53.2725]
+
+
+        for idx in range(len(image_list)):
+                self.extra_info.append(extra_info[idx])
+                self.flow_list.append(flow_list[idx])
+                self.image_list.append(image_list[idx])
+                self.depth_list.append(depth_list[idx])
+                self.sam_list.append(sam_list[idx])
+                self.sam2_list.append(sam2_list[idx])
+                self.calib.append(calib_l[idx])
+                self.baseline.append(baseline_l[idx])
+
+    def get_dc(self,index):#获取第一帧深度，第二帧深度，还有第一帧的变化深度,再来个内参
+        d1 = np.abs(disparity_loader(self.depth_list[index][0])).astype(np.float32)
+        d2 = np.abs(disparity_loader(self.depth_list[index][1])).astype(np.float32)
+
+        depth1 = cv2.imread(self.depth_list[index][3], cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH).astype(np.float32)
+        scene_z = cv2.imread(self.depth_list[index][2], cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)[:, :, 0]
+        depth3 = (scene_z.astype(np.float32) * 2.0 / 65535.0 - 1.0) * 1000.0 + depth1
+
+        not_use1 = (depth1 > 20000) | (depth1 <= 0) | (depth3 <= 0) | (~np.isfinite(depth3)) | (d1 <= 0) | (~np.isfinite(d1))
+        not_use2 = (d2 <= 0) | (~np.isfinite(d2))
+        fx, fy, cx, cy = self.calib[index]
+        intrinsics = np.array([fx, fy, cx, cy])
+        fl = intrinsics[0]
+        baseline_cm = self.baseline[index]
+        d1_gt = baseline_cm * fl / np.clip(depth1, 1e-6, None)
+        d3_gt = baseline_cm * fl / np.clip(depth3, 1e-6, None)
+        d3 = d1 + (d3_gt - d1_gt)
+
+        s = 0.5 + np.random.rand()
+        d1 = s * d1
+        d2 = s * d2
+        d3 = s * d3
+
+        d1[not_use1] = 0.0001
+        d2[not_use2] = 0.0001
+        d3[(~np.isfinite(d3)) | (d3 <= 0)] = 10000
+        d3[not_use1] = 10000
+
+        return d1,d2,d3,intrinsics
+class KITTI(SceneFlowDataset):
+    def __init__(self, aug_params=None, split='training', root='datasets/KITTI'):
         super(KITTI, self).__init__(aug_params, sparse=True)
         self.calib = []
         self.kitti = True
@@ -1140,6 +1670,15 @@ class KITTI(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/home
 
         disp1pre = sorted(glob(osp.join(root, 'disp_monster_training/*_10.png')))
         disp2pre = sorted(glob(osp.join(root, 'disp_monster_training/*_11.png')))
+        _require_equal_file_counts(
+            'KITTI',
+            image_10=images1o,
+            image_11=images2o,
+            disp_occ_0=disp1o,
+            disp_occ_1=disp2o,
+            disp_monster_10=disp1pre,
+            disp_monster_11=disp2pre,
+        )
 
         for j in range(images2o.__len__()):
                 images1.append(images1o[j])
@@ -1153,10 +1692,17 @@ class KITTI(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/home
             frame_id = img1.split('/')[-1]
             self.extra_info += [[frame_id]]
             self.image_list += [[img1, img2]]
+            self.sam_list += [_kitti_sam_path(img1)]
+            self.sam2_list += [_kitti_sam_path(img2)]
         for disps1, disps2,dispps1,dispps2 in zip(disp1, disp2,dispp1,dispp2):
             self.depth_list += [[disps1, disps2,dispps1,dispps2]]
 
         flowo = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
+        if len(flowo) != len(images2o):
+            raise RuntimeError(
+                'KITTI flow/image count mismatch: flow_occ=%d, images=%d'
+                % (len(flowo), len(images2o))
+            )
         for j in range(flowo.__len__()):
                 flow.append(flowo[j])
         self.flow_list = flow
@@ -1175,12 +1721,11 @@ class KITTI(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/home
         s = 0.5 + np.random.rand()
 
 
-        H, W = d1s.shape
-        intrinsics = np.array([721.5377, 721.5377, H/2.0,  W/2.0])
+        intrinsics = _kitti_intrinsics_from_image(self.image_list[index][0])
 
         return s*d1p,s*d2p,s*d3,intrinsics
-class KITTIab(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/home/xuxian/RAFT3D/datasets'
-    def __init__(self, aug_params=None, split='training', root='/mnt/hdd/hanling/sceneflow_data'):
+class KITTIab(SceneFlowDataset):
+    def __init__(self, aug_params=None, split='training', root='datasets/KITTI'):
         super(KITTIab, self).__init__(aug_params, sparse=True)
         self.calib = []
         self.kitti = True
@@ -1200,6 +1745,15 @@ class KITTIab(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/ho
 
         disp1pre = sorted(glob(osp.join(root, 'disp_monster_training/*_10.png')))
         disp2pre = sorted(glob(osp.join(root, 'disp_monster_training/*_11.png')))
+        _require_equal_file_counts(
+            'KITTIab',
+            image_10=images1o,
+            image_11=images2o,
+            disp_occ_0=disp1o,
+            disp_occ_1=disp2o,
+            disp_monster_10=disp1pre,
+            disp_monster_11=disp2pre,
+        )
 
         for j in range(images2o.__len__()):
             if j % 2 > 0:
@@ -1214,10 +1768,17 @@ class KITTIab(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/ho
             frame_id = img1.split('/')[-1]
             self.extra_info += [[frame_id]]
             self.image_list += [[img1, img2]]
+            self.sam_list += [_kitti_sam_path(img1)]
+            self.sam2_list += [_kitti_sam_path(img2)]
         for disps1, disps2,dispps1,dispps2 in zip(disp1, disp2,dispp1,dispp2):
             self.depth_list += [[disps1, disps2,dispps1,dispps2]]
 
         flowo = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
+        if len(flowo) != len(images2o):
+            raise RuntimeError(
+                'KITTIab flow/image count mismatch: flow_occ=%d, images=%d'
+                % (len(flowo), len(images2o))
+            )
         for j in range(flowo.__len__()):
             if j % 2 > 0:
                 flow.append(flowo[j])
@@ -1237,59 +1798,164 @@ class KITTIab(SceneFlowDataset):#/home/lh/RAFT_master/dataset/kitti_scene   '/ho
         s = 0.5 + np.random.rand()
 
 
-        H, W = d1s.shape
-        intrinsics = np.array([721.5377, 721.5377, H/2.0,  W/2.0])
+        intrinsics = _kitti_intrinsics_from_image(self.image_list[index][0])
 
         return s*d1p,s*d2p,s*d3,intrinsics
+
+def _set_depth_real_aug(dataset, enabled, prob):
+    if hasattr(dataset, "datasets"):
+        for sub_dataset in dataset.datasets:
+            _set_depth_real_aug(sub_dataset, enabled, prob)
+        return
+
+    if hasattr(dataset, "use_depth_real_aug"):
+        dataset.use_depth_real_aug = enabled
+        dataset.depth_real_aug_prob = prob
+
+def _set_rgb_sam_erase_aug(dataset, enabled, prob):
+    if hasattr(dataset, "datasets"):
+        for sub_dataset in dataset.datasets:
+            _set_rgb_sam_erase_aug(sub_dataset, enabled, prob)
+        return
+
+    if hasattr(dataset, "use_rgb_sam_erase_aug"):
+        dataset.use_rgb_sam_erase_aug = enabled
+        dataset.rgb_sam_erase_aug_prob = prob
+
+def _sam_mask_coverage(dataset):
+    if hasattr(dataset, "datasets"):
+        counts = [_sam_mask_coverage(sub_dataset) for sub_dataset in dataset.datasets]
+        return sum(item[0] for item in counts), sum(item[1] for item in counts)
+
+    total = len(getattr(dataset, "image_list", []))
+    sam2_list = getattr(dataset, "sam2_list", [])
+    present = sum(
+        1 for index in range(total)
+        if index < len(sam2_list)
+        and sam2_list[index] is not None
+        and osp.isfile(os.fspath(sam2_list[index]))
+    )
+    return total, present
+
 def fetch_dataloader(args):
     """ Create the data loader for the corresponding trainign set """
 
+    things_root = os.fspath(getattr(args, 'things_root', 'datasets/FlyingThings3D'))
+    driving_root = os.fspath(getattr(args, 'driving_root', 'datasets/Driving'))
+    sintel_root = os.fspath(getattr(args, 'sintel_root', 'datasets/Sintel'))
+    kitti_root = os.fspath(getattr(args, 'kitti_root', 'datasets/KITTI'))
+    kitti_ab_root = getattr(args, 'kitti_ab_root', None) or kitti_root
+    vkitti_root = os.fspath(getattr(args, 'vkitti_root', 'datasets/VKITTI2'))
+
     if args.stage == 'pretrain':
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
-        driving = Driving(aug_params, split='training')
-        thingsc = FlyingThings3D(aug_params,dstype='frames_cleanpass')
-        thingsf = FlyingThings3D(aug_params, dstype='frames_finalpass')
-        sintelc = MpiSintel(aug_params,dstype='clean')
-        sintelf = MpiSintel(aug_params, dstype='final')
-        monkey = MonkeyD(aug_params)
-        kitti = KITTI(aug_params, split='training')
-        vkittiu = vkitti(aug_params, split='training')#67k
+        driving = Driving(aug_params, split='training', root=driving_root)
+        thingsc = FlyingThings3D(aug_params, root=things_root, dstype='frames_cleanpass')
+        thingsf = FlyingThings3D(aug_params, root=things_root, dstype='frames_finalpass')
+        sintelc = MpiSintel(aug_params, root=sintel_root, dstype='clean')
+        sintelf = MpiSintel(aug_params, root=sintel_root, dstype='final')
+        #monkey = MonkeyD(aug_params)
+        kitti = KITTI(aug_params, split='training', root=kitti_root)
+        vkittiu = vkitti(aug_params, split='training', root=vkitti_root)#67k
         #spring = Spring(aug_params, split='train')#59w
-        train_dataset =  monkey+thingsf+thingsc+200*kitti+2*driving+6*sintelc+6*sintelf+vkittiu
+        train_dataset =  thingsf+thingsc+200*kitti+2*driving+6*sintelc+6*sintelf+vkittiu
     elif args.stage == 'driving':
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
-        driving = Driving(aug_params, split='training')
-        kitti = KITTI(aug_params, split='training')
-        vkittiu = vkitti(aug_params, split='training')
+        driving = Driving(aug_params, split='training', root=driving_root)
+        kitti = KITTI(aug_params, split='training', root=kitti_root)
+        vkittiu = vkitti(aug_params, split='training', root=vkitti_root)
         train_dataset = vkittiu+200*kitti+driving
 
     elif args.stage == 'abtrain':#这个是用于消融实验的数据准备，em就用driving和一部分的Sintel吧
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
         #Tartan = TartanAirV2(aug_params)
+        #driving = Driving(aug_params, split='training')
+        #driving = Driving_m(aug_params, split='training')
+        #vkittiu = vkitti_m(aug_params, split='training')
+        sintelc = MpiSintel(aug_params, root=sintel_root, dstype='clean',ifeval = 't_train')
+        sintelf = MpiSintel(aug_params, root=sintel_root, dstype='final',ifeval = 't_train')
+        #thingsc = FlyingThings3D(aug_params, dstype='frames_cleanpass')
+        kitti = KITTIab(aug_params, split='training', root=kitti_ab_root)
+        #vkittiu = vkitti(aug_params, split='training')  # 67k
+        #kitti = KITTI(aug_params, split='training')
         #thingsc = FlyingThings3D_subset(aug_params)
-        sintelc = MpiSintel(aug_params,dstype='clean',ifeval = 't_train')
-        sintelf = MpiSintel(aug_params, dstype='final', ifeval='t_train')
-        train_dataset = sintelc+sintelf
+        train_dataset = 10*kitti+sintelc+sintelf
     elif args.stage == 'fineting':
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
-        driving = Driving(aug_params, split='training')
-        kitti = KITTI(aug_params, split='training')
-        vkittiu = vkitti(aug_params, split='training')
+        driving = Driving(aug_params, split='training', root=driving_root)
+        kitti = KITTI(aug_params, split='training', root=kitti_root)
+        vkittiu = vkitti(aug_params, split='training', root=vkitti_root)
         train_dataset = vkittiu+200*kitti+driving
+    elif args.stage == 'kitti':
+        aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
+        train_dataset = KITTI(aug_params, split='training', root=kitti_root)
     elif args.stage == 'Sintel_CamLi':
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.5, 'max_scale': 0.5, 'do_flip': True}
-        thingsc = FlyingThings3D(aug_params, dstype='frames_cleanpass')
-        thingsf = FlyingThings3D(aug_params, dstype='frames_finalpass')
+        thingsc = FlyingThings3D(aug_params, root=things_root, dstype='frames_cleanpass')
+        #thingsf = FlyingThings3D(aug_params, dstype='frames_finalpass')
         #sintelc = MpiSintel(aug_params,dstype='clean')
         #sintelf = MpiSintel(aug_params, dstype='final')
-        train_dataset = thingsc+thingsf
-    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size,
-                                   pin_memory=False, shuffle=True, num_workers=8, drop_last=True)
+        train_dataset = thingsc
+    else:
+        raise ValueError(f"Unknown training stage: {args.stage}")
+
+    use_depth_real_aug = bool(getattr(args, 'use_depth_real_aug', False))
+    use_rgb_sam_erase_aug = bool(getattr(args, 'use_rgb_sam_erase_aug', False))
+
+    if use_depth_real_aug:
+        depth_real_aug_prob = float(getattr(args, 'depth_real_aug_prob', 1.0))
+        if not 0.0 <= depth_real_aug_prob <= 1.0:
+            raise ValueError('depth_real_aug_prob must be in [0, 1]')
+        _set_depth_real_aug(train_dataset, True, depth_real_aug_prob)
+        print('Depth real augmentation enabled with prob %.3f' % depth_real_aug_prob)
+
+    if use_rgb_sam_erase_aug:
+        rgb_sam_erase_aug_prob = float(getattr(args, 'rgb_sam_erase_aug_prob', 0.5))
+        if not 0.0 <= rgb_sam_erase_aug_prob <= 1.0:
+            raise ValueError('rgb_sam_erase_aug_prob must be in [0, 1]')
+        _set_rgb_sam_erase_aug(train_dataset, True, rgb_sam_erase_aug_prob)
+        print('RGB SAM erase augmentation enabled with prob %.3f' % rgb_sam_erase_aug_prob)
+
+    if use_depth_real_aug or use_rgb_sam_erase_aug:
+        total_masks, present_masks = _sam_mask_coverage(train_dataset)
+        print('Second-frame SAM mask coverage: %d/%d' % (present_masks, total_masks))
+        if getattr(args, 'require_sam_masks', False) and present_masks != total_masks:
+            raise FileNotFoundError(
+                'SAM mask coverage is incomplete: %d/%d second-frame masks found'
+                % (present_masks, total_masks)
+            )
+
+    num_workers = int(getattr(args, 'num_workers', 4))
+    if num_workers < 0:
+        raise ValueError('num_workers must be non-negative')
+
+    loader_kwargs = dict(
+        batch_size=args.batch_size,
+        pin_memory=bool(getattr(args, 'pin_memory', False)),
+        shuffle=True,
+        num_workers=num_workers,
+        drop_last=True,
+    )
+    data_seed = getattr(args, 'data_seed', None)
+    if data_seed is not None:
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(int(data_seed))
+        loader_kwargs['generator'] = loader_generator
+
+    if num_workers > 0:
+        prefetch_factor = int(getattr(args, 'prefetch_factor', 2))
+        if prefetch_factor <= 0:
+            raise ValueError('prefetch_factor must be positive when num_workers > 0')
+        loader_kwargs['persistent_workers'] = bool(
+            getattr(args, 'persistent_workers', False))
+        loader_kwargs['prefetch_factor'] = prefetch_factor
+
+    train_loader = data.DataLoader(train_dataset, **loader_kwargs)
 
     print('Training with %d image pairs' % len(train_dataset))
     return train_loader
 class Sintel_test(data.Dataset):
-    def __init__(self, aug_params=None, split='training', root='/home/lh/dataset/MPI-Sintel-complete', dstype='clean',ifeval = 't_all'):
+    def __init__(self, aug_params=None, split='training', root='datasets/Sintel', dstype='clean',ifeval = 't_all'):
 
         self.extra_info= []
         self.flow_list = []
@@ -1316,7 +1982,7 @@ class Sintel_test(data.Dataset):
                         self.flow_list += sorted(glob(osp.join(flow_root, scene, '*.flo')))
                         for i in range(len(image_list) - 1):
                             self.occ_list += [occ_list[i]]
-        if ifeval=='t_show':
+        elif ifeval=='t_show':
             for scene in os.listdir(image_root):
                 if scene in ['temple_2','market_6','cave_4','ambush_5']:
                     image_list = sorted(glob(osp.join(image_root, scene, '*.png')))
@@ -1332,8 +1998,6 @@ class Sintel_test(data.Dataset):
                         self.flow_list += sorted(glob(osp.join(flow_root, scene, '*.flo')))
                         for i in range(len(image_list) - 1):
                             self.occ_list += [occ_list[i]]
-
-
 
         elif ifeval=='t_train':
             for scene in os.listdir(image_root):
@@ -1385,7 +2049,7 @@ class Sintel_test(data.Dataset):
         depth3 = (torch.nn.functional.grid_sample(depth2, frepb,align_corners=True,mode='nearest').view(h, w))
         depth3 = depth3.view(h, w)
         H, W = depth1.shape
-        fx, fy, cx, cy = (1050, 1050, W/2.0, H/2.0)
+        fx, fy, cx, cy = (1050, 1050, (W - 1) / 2.0, (H - 1) / 2.0)
         intrinsics = np.array([fx, fy, cx, cy])
         vaild = 1-occ.numpy()
         disp1 = 360/depth1.numpy()
@@ -1420,10 +2084,10 @@ class Sintel_test(data.Dataset):
         d1 = torch.from_numpy(d1[np.newaxis,:,:]).float()
         d2 = torch.from_numpy(d2[np.newaxis,:,:]).float()
         dz = (torch.from_numpy(dd1[np.newaxis,:,:])-d1).float()
-        valid = (flow[0].abs() < 1000) & (flow[1].abs() < 1000)
+        valid = ((flow[0].abs() < 1000) & (flow[1].abs() < 1000)).float()
         return img1, img2, flow, d1, d2, dz,intrinsics,valid
 class vkitti_test(data.Dataset):
-    def __init__(self,root='/home/lh/all_datasets/vkitti'):
+    def __init__(self, root='datasets/VKITTI2'):
 
         candidate_all = glob('%s/Scene*/*/*/*wardFlow/*/*.png' % (root))
         extra_info = []
@@ -1515,13 +2179,13 @@ class vkitti_test(data.Dataset):
         d2 = torch.from_numpy(d2[np.newaxis,:,:]).float()
         dz = (torch.from_numpy(dd1[np.newaxis,:,:])-d1).float()
         if valid is not None:
-            valid = torch.from_numpy(valid)
+            valid = torch.from_numpy(valid).float()
         else:
-            valid = (flow[0].abs() < 1000) & (flow[1].abs() < 1000)
+            valid = ((flow[0].abs() < 1000) & (flow[1].abs() < 1000)).float()
         return img1, img2, flow, d1, d2, dz,intrinsics,valid
 #这里搞一个KITTI的测试版本
 class kitti_test(data.Dataset):
-    def __init__(self, aug_params=None, split='training', root='/mnt/hdd/hanling/sceneflow_data/KITTI'):
+    def __init__(self, aug_params=None, split='training', root='datasets/KITTI',spl = 2):
         self.extra_info= []
         self.flow_list = []
         self.image_list = []
@@ -1543,9 +2207,18 @@ class kitti_test(data.Dataset):
 
         disp1pre = sorted(glob(osp.join(root, 'disp_monster_training/*_10.png')))
         disp2pre = sorted(glob(osp.join(root, 'disp_monster_training/*_11.png')))
+        _require_equal_file_counts(
+            'KITTI validation',
+            image_10=images1o,
+            image_11=images2o,
+            disp_occ_0=disp1o,
+            disp_occ_1=disp2o,
+            disp_monster_10=disp1pre,
+            disp_monster_11=disp2pre,
+        )
 
         for j in range(images2o.__len__()):
-            if j % 2 == 0:
+            if j % spl == 0:
                 images1.append(images1o[j])
                 images2.append(images2o[j])
                 disp1.append(disp1o[j])
@@ -1561,8 +2234,13 @@ class kitti_test(data.Dataset):
             self.depth_list += [[disps1, disps2,dispps1,dispps2]]
 
         flowo = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
+        if len(flowo) != len(images2o):
+            raise RuntimeError(
+                'KITTI validation flow/image count mismatch: flow_occ=%d, images=%d'
+                % (len(flowo), len(images2o))
+            )
         for j in range(flowo.__len__()):
-            if j % 2 == 0:
+            if j % spl == 0:
                 flow.append(flowo[j])
         self.flow_list = flow
 
@@ -1577,8 +2255,7 @@ class kitti_test(data.Dataset):
         d2p = readDepth(self.depth_list[index][3])
         d3 = d1p+(d2s-d1s)
 
-        H, W = d1s.shape
-        intrinsics = np.array([721.5377, 721.5377, H/2.0,  W/2.0])
+        intrinsics = _kitti_intrinsics_from_image(self.image_list[index][0])
 
         return d1p,d2p,d3,intrinsics
     def __len__(self):
@@ -1613,7 +2290,7 @@ class kitti_test(data.Dataset):
 
         return img1, img2, flow, d1, d2, dz,intrinsics,valid
 class kitti_testsubmit(data.Dataset):
-    def __init__(self, aug_params=None, split='testing', root='/home/lh/all_datasets/kitti'):
+    def __init__(self, aug_params=None, split='testing', root='datasets/KITTI'):
         self.extra_info= []
         self.flow_list = []
         self.image_list = []

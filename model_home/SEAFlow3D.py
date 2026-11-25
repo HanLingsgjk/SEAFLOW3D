@@ -53,10 +53,10 @@ class SEAFLOW3D(nn.Module):
         args.corr_levels = 4
         args.corr_radius = 4
 
-        if 'dropout' not in self.args:
+        if not hasattr(self.args, 'dropout'):
             self.args.dropout = 0
 
-        if 'alternate_corr' not in self.args:
+        if not hasattr(self.args, 'alternate_corr'):
             self.args.alternate_corr = False
 
         self.fnet = BasicEncoder_resconv(input_dim=3,output_dim=256, norm_fn="group",model_type="ccmr")
@@ -134,8 +134,11 @@ class SEAFLOW3D(nn.Module):
         # optical flow computed as difference: flow = coords1 - coords0
         return coords0, coords1
 
-    def forward(self, image1, image2, d1,d2,iters=12, flow_init=None, upsample=True, test_mode=False):
+    def forward(self, image1, image2, d1, d2, intrinsics=None,
+                iters=12, flow_init=None, upsample=True, test_mode=False):
         """ Estimate optical flow between pair of frames """
+        # Kept for compatibility with the shared training/evaluation entry.
+        del intrinsics
         #搞一个参考RAFT3D版本的，u,v,d
         #在之前的实验中初始化部件搞三次是最好的，这部分要单独分出来
         image1 = 2*(image1 / 255.0)-1.0
@@ -236,7 +239,7 @@ class SEAFLOW3D(nn.Module):
 
             time_u_16s = time.time()
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow,delta_dz = self.update_blockx16(net16, inp16,corrd,corr, flow2d,depthc)
+                net16, up_mask, delta_flow,delta_dz = self.update_blockx16(net16, inp16,corrd,corr, flow2d,depthc)  # 2026-11 修正：隐状态接着往下一轮传（原来写成 net，返回的隐状态被丢掉）
             time_u_16e = time.time()
 
             x16coords1 = x16coords1+delta_flow
@@ -286,7 +289,7 @@ class SEAFLOW3D(nn.Module):
             time_u_8s = time.time()
             #todo 迭代优化器（Unet版本）
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow,delta_dz = self.update_block(net8, inp8,corrd ,corr, flow2d,depthc)
+                net8, up_mask, delta_flow,delta_dz = self.update_block(net8, inp8,corrd ,corr, flow2d,depthc)  # 2026-11 修正：同上
             x8coords1 = x8coords1+delta_flow
             d2_8xu = d2_8xu+delta_dz
             time_u_8e = time.time()
@@ -331,7 +334,7 @@ class SEAFLOW3D(nn.Module):
 
             time_u_4s = time.time()
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow, delta_dz = self.update_block(net4, inp4,corrd, corr, flow2d, depthc)
+                net4, up_mask, delta_flow, delta_dz = self.update_block(net4, inp4,corrd, corr, flow2d, depthc)  # 2026-11 修正：同上
             time_u_4e = time.time()
             x4coords1 = x4coords1 + delta_flow
             d2_4xu = d2_4xu + delta_dz

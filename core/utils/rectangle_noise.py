@@ -127,4 +127,3 @@ class retangle():
             flag2 = 0
 
         return per1, per2, ans, flag1 + flag2
-

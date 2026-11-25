@@ -700,6 +700,8 @@ class Tiny_Unetlikev7(nn.Module):#拿这个出一个上采样
         pred6 = self.proj6(conv4)
 
         return pred6
+
+
 #使用Convnext强化卷积范围
 class Tiny_Unetlikev7t(nn.Module):#拿这个出一个上采样
     def __init__(self, inplanes, outplanes,mid_channle = 128):
@@ -849,50 +851,95 @@ class Tiny_Unetlikev2(nn.Module):
 
     # 使用Convnext强化卷积范围
 class Tiny_Unetlikev8(nn.Module):
-        def __init__(self, inplanes, outplanes, mid_channle=128):
-            super(Tiny_Unetlikev8, self).__init__()
-            # self.proj = conv2DBatchNormRelu(in_channels=inplanes, k_size=1, n_filters=mid_channle, padding=0, stride=1)
-            self.proj = ConvNeXtV2tiny(inplanes, mid_channle, bl=2)
-            self.inplanes = mid_channle
-            # Vanilla Residual Blocks
-            self.res_block3 = ConvNeXtV2tiny(self.inplanes, self.inplanes, kszie=7, down=True)
-            self.res_block5 = ConvNeXtV2tiny(self.inplanes, self.inplanes, kszie=5, down=True)
-            self.pyramid_pooling = pyramidPooling(self.inplanes, levels=3)
-            # Iconvs
-            self.upconv6 = conv2DBatchNormRelu(in_channels=self.inplanes, k_size=3, n_filters=self.inplanes,
-                                               padding=1, stride=1)
-            self.upconv5 = conv2DBatchNormRelu(in_channels=self.inplanes, k_size=3, n_filters=64,
-                                               padding=1, stride=1)
+    """V7 topology with BN paths replaced by Conv2d+GroupNorm blocks."""
 
-            self.iconv5 = conv2DBatchNormRelu(in_channels=self.inplanes * 4, k_size=3, n_filters=self.inplanes,
-                                              padding=1, stride=1)
-            self.iconv4 = conv2DBatchNormRelu(in_channels=self.inplanes + 64, k_size=3, n_filters=self.inplanes,
-                                              padding=1, stride=1)
+    def __init__(self, inplanes, outplanes, mid_channle=128):
+        super(Tiny_Unetlikev8, self).__init__()
 
-            self.proj6 = ConvNeXtV2tiny(self.inplanes, outplanes)
-            for m in self.modules():
-                if isinstance(m, nn.Conv2d):
-                    n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                    m.weight.data.normal_(0, math.sqrt(2. / n))
-                    if hasattr(m.bias, 'data'):
-                        m.bias.data.zero_()
+        def conv_gn_leaky(in_channels, out_channels, kernel_size):
+            num_groups = math.gcd(8, int(out_channels))
+            return nn.Sequential(
+                nn.Conv2d(
+                    int(in_channels),
+                    int(out_channels),
+                    kernel_size=kernel_size,
+                    stride=1,
+                    padding=kernel_size // 2,
+                    bias=False,
+                ),
+                nn.GroupNorm(num_groups, int(out_channels)),
+                nn.LeakyReLU(0.1, inplace=True),
+            )
 
-        def forward(self, x,cx16):
-            proj = self.proj(x)  # 4x  1
-            rconv3 = self.res_block3(proj)  # 8x  1/2
-            conv6 = self.res_block5(rconv3)  # 16x  1/4
-            conv6 = self.pyramid_pooling(conv6)  # 64x
+        self.proj = ConvNeXtV2tiny(inplanes, mid_channle, bl=2)
+        self.inplanes = mid_channle
+        self.res_block3 = ConvNeXtV2tiny(
+            self.inplanes, self.inplanes, kszie=7, down=True)
+        self.res_block5 = ConvNeXtV2tiny(
+            self.inplanes, self.inplanes, kszie=5, down=True)
 
-            conv6u = F.upsample(conv6, [rconv3.size()[2], rconv3.size()[3]], mode='bilinear')
-            concat5 = torch.cat((cx16,rconv3, self.upconv6(conv6u)), dim=1)
-            conv5 = self.iconv5(concat5)  # 32x
+        # Keep pyramidPooling's pooling rule, but make every path independent
+        # of batch statistics with Conv2d+GroupNorm+LeakyReLU.
+        self.pyramid_paths = nn.ModuleList([
+            conv_gn_leaky(self.inplanes, self.inplanes, kernel_size=1)
+            for _ in range(3)
+        ])
+        self.pyramid_relu = nn.LeakyReLU(0.1, inplace=True)
 
-            conv5u = F.upsample(conv5, [proj.size()[2], proj.size()[3]], mode='bilinear')
-            concat4 = torch.cat((proj, self.upconv5(conv5u)), dim=1)
-            conv4 = self.iconv4(concat4)  # 16x
-            pred6 = self.proj6(conv4)
+        self.upconv6 = conv_gn_leaky(
+            self.inplanes, self.inplanes, kernel_size=3)
+        self.upconv5 = conv_gn_leaky(
+            self.inplanes, 64, kernel_size=3)
+        self.iconv5 = conv_gn_leaky(
+            self.inplanes * 2, self.inplanes, kernel_size=3)
+        self.iconv4 = conv_gn_leaky(
+            self.inplanes + 64, self.inplanes, kernel_size=3)
+        self.proj6 = ConvNeXtV2tiny(self.inplanes, outplanes)
 
-            return pred6
+        # Preserve the initialization convention used by Tiny_Unetlikev7.
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+                if hasattr(m.bias, 'data'):
+                    m.bias.data.zero_()
+
+    def _pyramid_pooling(self, x):
+        h, w = x.shape[2:]
+        k_sizes = []
+        strides = []
+        for pool_size in np.linspace(
+                1, min(h, w) // 2, len(self.pyramid_paths), dtype=int):
+            k_sizes.append((int(h / pool_size), int(w / pool_size)))
+            strides.append((int(h / pool_size), int(w / pool_size)))
+        k_sizes = k_sizes[::-1]
+        strides = strides[::-1]
+
+        pp_sum = x
+        for index, module in enumerate(self.pyramid_paths):
+            out = F.avg_pool2d(
+                x, k_sizes[index], stride=strides[index], padding=0)
+            out = module(out)
+            out = F.upsample(out, size=(h, w), mode='bilinear')
+            pp_sum = pp_sum + out / len(self.pyramid_paths)
+        return self.pyramid_relu(pp_sum / 2.0)
+
+    def forward(self, x):
+        proj = self.proj(x)
+        rconv3 = self.res_block3(proj)
+        conv6 = self.res_block5(rconv3)
+        conv6 = self._pyramid_pooling(conv6)
+
+        conv6u = F.upsample(
+            conv6, [rconv3.size()[2], rconv3.size()[3]], mode='bilinear')
+        concat5 = torch.cat((rconv3, self.upconv6(conv6u)), dim=1)
+        conv5 = self.iconv5(concat5)
+
+        conv5u = F.upsample(
+            conv5, [proj.size()[2], proj.size()[3]], mode='bilinear')
+        concat4 = torch.cat((proj, self.upconv5(conv5u)), dim=1)
+        conv4 = self.iconv4(concat4)
+        return self.proj6(conv4)
 #使用Convnext强化卷积范围
 class Tiny_Unetlikev3(nn.Module):
     def __init__(self, inplanes, outplanes,mid_channle = 128):

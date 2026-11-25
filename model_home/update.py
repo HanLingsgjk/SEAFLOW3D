@@ -399,73 +399,6 @@ class MotioneEncoderRF3Duvd_wod16v1(nn.Module):
         cor_flo = torch.cat([corrdo,corro,flo,dzo], dim=1)
         out = self.conv(cor_flo)
         return torch.cat([out, flow2d,depthc], dim=1)
-
-
-class MotioneEncoderP2P_Flow(nn.Module):
-    def __init__(self, cor_planes):
-        super(MotioneEncoderP2P_Flow, self).__init__()
-
-        self.convc1 = nn.Conv2d(cor_planes, 256, 1)
-        self.convc2 = nn.Conv2d(256, 128, 3, padding=1)
-
-        self.convf1 = nn.Conv2d(2, 128, 7, padding=3)
-        self.convf2 = nn.Conv2d(128, 32, 3, padding=1)
-
-        self.conv_flo = ConvNeXtV2tiny(128+32, 128-2, kszie=7, bl=2)
-
-    def forward(self, corr, flow2d):
-
-        corro = F.relu(self.convc1(corr))
-        corro = F.relu(self.convc2(corro))
-
-        flo = F.relu(self.convf1(flow2d))
-        flo = F.relu(self.convf2(flo))
-
-        cor_flo = torch.cat([corro,flo], dim=1)
-
-        out_flow = self.conv_flo(cor_flo)
-        return torch.cat([out_flow, flow2d], dim=1)
-
-
-class MotioneEncoderP2P_SVS(nn.Module):
-    def __init__(self, cor_planes):
-        super(MotioneEncoderP2P_SVS, self).__init__()
-        self.convr1 = nn.Conv2d(cor_planes, 128, 1)
-        self.convr2 = nn.Conv2d(128, 64, 3, padding=1)
-
-        self.convuvrj1 = nn.Conv2d(2 * cor_planes, 128, 1)
-        self.convuvrj2 = nn.Conv2d(128, 64, 3, padding=1)
-
-        self.convdrj1 = nn.Conv2d(cor_planes, 128, 1)
-        self.convdrj2 = nn.Conv2d(128, 64, 3, padding=1)
-
-        self.convz1 = nn.Conv2d(1, 64, 7, padding=3)
-        self.convz2 = nn.Conv2d(64, 32, 3, padding=1)
-
-        self.conv_svs = ConvNeXtV2tiny(64 * 3+32, 128-1, kszie=7, bl=2)
-
-    def forward(self, p2p_r, dru, drv, drd, depthc):
-
-        res = F.relu(self.convr1(p2p_r))
-        res = F.relu(self.convr2(res))
-
-        dem = F.relu(self.convz1(depthc))
-        de = F.relu(self.convz2(dem))
-
-        uv_rj = torch.cat([p2p_r * dru, p2p_r * drv], dim=1)
-        uv_rj = F.relu(self.convuvrj1(uv_rj))
-        uv_rj = F.relu(self.convuvrj2(uv_rj))
-
-        d_rj = F.relu(self.convdrj1(p2p_r * drd))
-        d_rj = F.relu(self.convdrj2(d_rj))
-
-        svs = torch.cat([res, uv_rj, d_rj,de], dim=1)
-        svs_en = self.conv_svs(svs)
-
-        return torch.cat([svs_en, depthc], dim=1)
-
-
-
 class MotioneEncoderRF3Duvd_wod16v3(nn.Module):
     def __init__(self, args):
         super(MotioneEncoderRF3Duvd_wod16v3, self).__init__()
@@ -843,7 +776,7 @@ class MotioneEncoderRF3Duvd_wdv7(nn.Module):#todo这个版本把深度编码单�
         out_flow = self.conv_flo(cor_flo)
         out_dpz = self.conv_dpz(cor_dpz)
         return torch.cat([out_flow, out_dpz, flow2d, depthc], dim=1)
-from core.utils.submodule import  Tiny_Unetlikev7,Tiny_Unetlikev7t
+from core.utils.submodule import  Tiny_Unetlikev7,Tiny_Unetlikev7t,Tiny_Unetlikev8
 
 class dzhead(nn.Module):
     def __init__(self, input_dim=128, hidden_dim=256):
@@ -856,24 +789,15 @@ class dzhead(nn.Module):
         return self.conv2(self.relu(self.conv1(x)))
 
 
-class P2PMotionUpdateBlock(nn.Module):
-    def __init__(self, hidden_dim=96, motion_dim=256):
-        super(P2PMotionUpdateBlock, self).__init__()
-        self.TinyU = Tiny_Unetlikev7(motion_dim + 2 * hidden_dim, hidden_dim, mid_channle=hidden_dim)
-        self.flow_head = FlowHead(hidden_dim, hidden_dim=256)
-        self.dz_head = dzhead(hidden_dim, hidden_dim=256)
-        self.mask = nn.Sequential(
-            nn.Conv2d(hidden_dim, 256, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 4 * 9, 1, padding=0))
+class Confhead(nn.Module):
+    def __init__(self, input_dim=128+128+128+64, hidden_dim=256):
+        super(dzhead, self).__init__()
+        self.conv1 = nn.Conv2d(input_dim, hidden_dim, 3, padding=1)
+        self.conv2 = nn.Conv2d(hidden_dim, 1, 3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, net, inp, motion_features):
-        inp = torch.cat([inp, motion_features], dim=1)
-        net = self.TinyU(torch.cat([net, inp], dim=1))
-        delta_flow = self.flow_head(net)
-        delta_dz = self.dz_head(net)
-        mask = .25 * self.mask(net)
-        return net, mask, delta_flow, delta_dz
+    def forward(self, x):
+        return self.conv2(self.relu(self.conv1(x)))
 
 
 class RF3DuvdUpdateBlock(nn.Module):
@@ -1397,3 +1321,183 @@ class RF3DuvdUpdateBlockwdv7(nn.Module):
         delta_dz = self.dz_head(net)
 
         return net, delta_flow,delta_dz
+
+class MotioneEncoderP2P_Flow(nn.Module):
+    def __init__(self, cor_planes):
+        super(MotioneEncoderP2P_Flow, self).__init__()
+
+        self.convc1 = nn.Conv2d(cor_planes, 256, 1)
+        self.convc2 = nn.Conv2d(256, 128, 3, padding=1)
+
+        self.convf1 = nn.Conv2d(2, 128, 7, padding=3)
+        self.convf2 = nn.Conv2d(128, 32, 3, padding=1)
+
+        self.conv_flo = ConvNeXtV2tiny(128+32, 128-2, kszie=7, bl=2)
+
+    def forward(self, corr, flow2d):
+
+        corro = F.relu(self.convc1(corr))
+        corro = F.relu(self.convc2(corro))
+
+        flo = F.relu(self.convf1(flow2d))
+        flo = F.relu(self.convf2(flo))
+
+        cor_flo = torch.cat([corro,flo], dim=1)
+
+        out_flow = self.conv_flo(cor_flo)
+        return torch.cat([out_flow, flow2d], dim=1)
+
+
+class MotioneEncoderP2P_SVS(nn.Module):
+    def __init__(self, cor_planes):
+        super(MotioneEncoderP2P_SVS, self).__init__()
+        self.convr1 = nn.Conv2d(cor_planes, 128, 1)
+        self.convr2 = nn.Conv2d(128, 64, 3, padding=1)
+
+        self.convuvrj1 = nn.Conv2d(2 * cor_planes, 128, 1)
+        self.convuvrj2 = nn.Conv2d(128, 64, 3, padding=1)
+
+        self.convdrj1 = nn.Conv2d(cor_planes, 128, 1)
+        self.convdrj2 = nn.Conv2d(128, 64, 3, padding=1)
+
+        self.convz1 = nn.Conv2d(1, 64, 7, padding=3)
+        self.convz2 = nn.Conv2d(64, 32, 3, padding=1)
+
+        self.conv_svs = ConvNeXtV2tiny(64 * 3+32, 128-1, kszie=7, bl=2)
+        self.gn_eps = 1e-6
+
+    def forward(self, p2p_r, dru, drv, drd, depthc):
+
+        res = F.relu(self.convr1(p2p_r))
+        res = F.relu(self.convr2(res))
+
+        dem = F.relu(self.convz1(depthc))
+        de = F.relu(self.convz2(dem))
+
+        gn_den = (dru ** 2 + drv ** 2 + drd ** 2).detach().clamp(min=self.gn_eps)
+        gn_u = -p2p_r * dru / gn_den
+        gn_v = -p2p_r * drv / gn_den
+        gn_d = -p2p_r * drd / gn_den
+
+        uv_rj = torch.cat([gn_u, gn_v], dim=1)
+        uv_rj = F.relu(self.convuvrj1(uv_rj))
+        uv_rj = F.relu(self.convuvrj2(uv_rj))
+
+        d_rj = F.relu(self.convdrj1(gn_d))
+        d_rj = F.relu(self.convdrj2(d_rj))
+
+        svs = torch.cat([res, uv_rj, d_rj,de], dim=1)
+        svs_en = self.conv_svs(svs)
+
+        return torch.cat([svs_en, depthc], dim=1)
+class MotioneEncoderPC(nn.Module):
+    def __init__(self, cor_planes):
+        super(MotioneEncoderPC, self).__init__()
+        self.convsvs1 = nn.Conv2d(cor_planes, 256, 1)
+        self.convsvs2 = nn.Conv2d(256, 128, 3, padding=1)
+
+        self.convz1 = nn.Conv2d(1, 32, 7, padding=3)
+        self.convz2 = nn.Conv2d(32, 16, 3, padding=1)
+
+        self.convuv1 = nn.Conv2d(2, 64, 7, padding=3)
+        self.convuv2 = nn.Conv2d(64, 32, 3, padding=1)
+
+        self.convrd1 = nn.Conv2d(1, 32, 7, padding=3)
+        self.convrd2 = nn.Conv2d(32, 16, 3, padding=1)
+
+        self.convpr1 = nn.Conv2d(1, 32, 7, padding=3)
+        self.convpr2 = nn.Conv2d(32, 16, 3, padding=1)
+
+        self.conv_all = ConvNeXtV2tiny(128+80, 128-5, kszie=7, bl=2)
+
+    def forward(self,svs,p2p_r, dru, drv, drd, depthc):
+
+        p2p_r = torch.nan_to_num(p2p_r).clamp(-50.0, 50.0)
+        gn_den = (dru ** 2 + drv ** 2 + drd ** 2).detach().clamp(min=1e-6)
+        step_u = -p2p_r * dru / gn_den
+        step_v = -p2p_r * drv / gn_den
+        step_d = -p2p_r * drd / gn_den
+        step_u = torch.nan_to_num(step_u).clamp(-10.0, 10.0)
+        step_v = torch.nan_to_num(step_v).clamp(-10.0, 10.0)
+        step_d = torch.nan_to_num(step_d).clamp(-10.0, 10.0)
+
+
+        svsu = F.relu(self.convsvs1(svs))#old svs like SEAFLOW3DP
+        svsou = F.relu(self.convsvs2(svsu))
+
+        dem = F.relu(self.convz1(depthc))#depthc
+        de = F.relu(self.convz2(dem))
+
+        uv_rj = torch.cat([step_u, step_v], dim=1)#dru, drv
+        uv_rjou = F.relu(self.convuv1(uv_rj))
+        uv_rjou = F.relu(self.convuv2(uv_rjou))
+
+        d_rjou = F.relu(self.convrd1(step_d))#drd
+        d_rjou = F.relu(self.convrd2(d_rjou))
+
+        prou = F.relu(self.convpr1(p2p_r))  # drd
+        prou = F.relu(self.convpr2(prou))
+
+        feaall = torch.cat([svsou, de, uv_rjou,d_rjou,prou], dim=1)
+        feaall = self.conv_all(feaall)
+
+        return torch.cat([feaall, depthc,p2p_r,step_u, step_v,step_d], dim=1)
+
+class MotioneEncoderDirect_SVS(nn.Module):
+    def __init__(self, cor_planes, out_dim=68):
+        super(MotioneEncoderDirect_SVS, self).__init__()
+        self.convcd1 = nn.Conv2d(cor_planes, 128, 1)
+        self.convcd2 = nn.Conv2d(128, 64, 3, padding=1)
+
+        self.convz1 = nn.Conv2d(1, 64, 7, padding=3)
+        self.convz2 = nn.Conv2d(64, 32, 3, padding=1)
+
+        self.conv_dpz = ConvNeXtV2tiny(64 + 32, out_dim - 1, kszie=7, bl=2)
+
+    def forward(self, corrdu, depthc):
+        corrdo = F.relu(self.convcd1(corrdu))
+        corrdo = F.relu(self.convcd2(corrdo))
+
+        dzo = F.relu(self.convz1(depthc))
+        dzo = F.relu(self.convz2(dzo))
+
+        out_dpz = self.conv_dpz(torch.cat([corrdo, dzo], dim=1))
+        return torch.cat([out_dpz, depthc], dim=1)
+
+class P2PMotionUpdateBlock(nn.Module):
+    def __init__(self, hidden_dim=96, motion_dim=256):
+        super(P2PMotionUpdateBlock, self).__init__()
+        self.TinyU = Tiny_Unetlikev7(motion_dim + 2 * hidden_dim, hidden_dim, mid_channle=hidden_dim)
+        self.flow_head = FlowHead(hidden_dim, hidden_dim=256)
+        self.dz_head = dzhead(hidden_dim, hidden_dim=256)
+        self.mask = nn.Sequential(
+            nn.Conv2d(hidden_dim, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 4 * 9, 1, padding=0))
+
+    def forward(self, net, inp, motion_features):
+        inp = torch.cat([inp, motion_features], dim=1)
+        net = self.TinyU(torch.cat([net, inp], dim=1))
+        delta_flow = self.flow_head(net)
+        delta_dz = self.dz_head(net)
+        mask = .25 * self.mask(net)
+        return net, mask, delta_flow, delta_dz
+
+class P2PMotionUpdateBlockGN(nn.Module):
+    def __init__(self, hidden_dim=96, motion_dim=256):
+        super(P2PMotionUpdateBlockGN, self).__init__()
+        self.TinyU = Tiny_Unetlikev8(motion_dim + 2 * hidden_dim, hidden_dim, mid_channle=hidden_dim)
+        self.flow_head = FlowHead(hidden_dim, hidden_dim=256)
+        self.dz_head = dzhead(hidden_dim, hidden_dim=256)
+        self.mask = nn.Sequential(
+            nn.Conv2d(hidden_dim, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 4 * 9, 1, padding=0))
+
+    def forward(self, net, inp, motion_features):
+        inp = torch.cat([inp, motion_features], dim=1)
+        net = self.TinyU(torch.cat([net, inp], dim=1))
+        delta_flow = self.flow_head(net)
+        delta_dz = self.dz_head(net)
+        mask = .25 * self.mask(net)
+        return net, mask, delta_flow, delta_dz

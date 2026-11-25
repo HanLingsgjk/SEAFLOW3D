@@ -234,7 +234,7 @@ class SEAFLOW3DP(nn.Module):
 
             time_u_16s = time.time()
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow,delta_dz = self.update_blockx16(net16, inp16,corrd,corr, flow2d,depthc)
+                net16, up_mask, delta_flow,delta_dz = self.update_blockx16(net16, inp16,corrd,corr, flow2d,depthc)  # 2026-11 修正：隐状态接着往下一轮传（同 SEAFlow3D.py）
             time_u_16e = time.time()
 
             x16coords1 = x16coords1+delta_flow
@@ -284,7 +284,7 @@ class SEAFLOW3DP(nn.Module):
             time_u_8s = time.time()
             #todo 迭代优化器（Unet版本）
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow,delta_dz = self.update_block(net8, inp8,corrd ,corr, flow2d,depthc)
+                net8, up_mask, delta_flow,delta_dz = self.update_block(net8, inp8,corrd ,corr, flow2d,depthc)  # 2026-11 修正：同上
             x8coords1 = x8coords1+delta_flow
             d2_8xu = d2_8xu+delta_dz
             time_u_8e = time.time()
@@ -329,7 +329,7 @@ class SEAFLOW3DP(nn.Module):
 
             time_u_4s = time.time()
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow, delta_dz = self.update_block(net4, inp4,corrd, corr, flow2d, depthc)
+                net4, up_mask, delta_flow, delta_dz = self.update_block(net4, inp4,corrd, corr, flow2d, depthc)  # 2026-11 修正：同上
             time_u_4e = time.time()
             x4coords1 = x4coords1 + delta_flow
             d2_4xu = d2_4xu + delta_dz

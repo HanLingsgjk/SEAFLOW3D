@@ -6,7 +6,7 @@ import cv2
 import matplotlib.pyplot as plt
 from glob import glob
 import os.path as osp
-from model_home.RFlow3D_MSabv4_2 import RFlow3D_MSab_v8
+from model_home.SEAFlow3D import SEAFLOW3D
 import Dataset_home.dataset_3dflowuvd as datasets
 from core.utils.utils import InputPadder
 from core.utils.flow_viz import flow2rgb
@@ -882,23 +882,19 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    model = torch.nn.DataParallel(RFlow3D_MSab_v8(args))
-
-    pretrained_dict = torch.load(args.model)
-    old_list = {}
-    for k, v in pretrained_dict.items():
-        old_list.update({k: v})
-    model.load_state_dict(old_list, strict=False)
+    # 2026-11：换成修正隐状态后的 SEAFLOW3D（model_home/SEAFlow3D.py），按层名严格加载发布的权重（checkpoint 带 DataParallel 的 module. 前缀）
+    model = torch.nn.DataParallel(SEAFLOW3D(args))
+    model.load_state_dict(torch.load(args.model, map_location='cpu'), strict=True)
 
     model.cuda()
     model.eval()
 
     with torch.no_grad():
         #validate_vkitti(model.module, iters=6)
-        validate_sintel(model, iters=6, typei='t_all', detype='final')
+        #validate_sintel(model, iters=6, typei='t_all', detype='final')
         #kitti_sceneflow_submission(model.module)
         #Demo_vis_dir(model.module)
-        #Demo_runtime(model.module)
+        Demo_runtime(model.module)
         #validate_kitti(model.module, iters=6)
         #validate_kitti_sequence(model.module, iters=8)
         #validate_sintel_sequence(model.module,typei= 't_test')

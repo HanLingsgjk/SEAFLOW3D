@@ -83,7 +83,7 @@ class GRN(nn.Module):
         super().__init__()
         self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
         self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim))
-        self.xita = nn.Parameter(torch.zeros(1, 1, 1, dim))#后面那个能不能直接用这个解决阿
+        #self.xita = nn.Parameter(torch.zeros(1, 1, 1, dim))#后面那个能不能直接用这个解决阿
 
     def forward(self, x):
         Gx = torch.norm(x, p=2, dim=(1,2), keepdim=True)

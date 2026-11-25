@@ -64,26 +64,39 @@ class SceneFlowAugmentor:
 
         return img1, img2
 
-    def spatial_transform(self, img1, img2, flow, d1,d2,dd1,intrinsics):
-        # randomly sample scale
+    def spatial_transform(self, img1, img2, flow, d1, d2, dd1, intrinsics):
+        import numpy as np
+        import cv2
+
+        intrinsics = intrinsics.copy()
+
         ht, wd = img1.shape[:2]
-        min_scale = np.maximum(
-            (self.crop_size[0] + 8) / float(ht),
-            (self.crop_size[1] + 8) / float(wd))
+        crop_h, crop_w = self.crop_size
 
-        scale = 2 ** np.random.uniform(self.min_scale, self.max_scale)
-        scale_x = scale
-        scale_y = scale
-        if np.random.rand() < self.stretch_prob:
-            scale_x *= 2 ** np.random.uniform(-self.max_stretch, self.max_stretch)
-            scale_y *= 2 ** np.random.uniform(-self.max_stretch, self.max_stretch)
+        # 保证 resize 后至少能 crop
+        min_scale_x = (crop_w + 1) / float(wd)
+        min_scale_y = (crop_h + 1) / float(ht)
 
-        scale_x = np.clip(scale_x, min_scale, None)
-        scale_y = np.clip(scale_y, min_scale, None)
-        intrinsics *= [scale_x, scale_y, scale_x, scale_y]
+        # 默认不缩放
+        scale_x = 1.0
+        scale_y = 1.0
 
+        # 如果触发 spatial aug，采随机尺度
         if np.random.rand() < self.spatial_aug_prob:
-            # rescale the images
+            scale = 2 ** np.random.uniform(self.min_scale, self.max_scale)
+            scale_x = scale
+            scale_y = scale
+
+            if np.random.rand() < self.stretch_prob:
+                scale_x *= 2 ** np.random.uniform(-self.max_stretch, self.max_stretch)
+                scale_y *= 2 ** np.random.uniform(-self.max_stretch, self.max_stretch)
+
+        # 无论是否触发增强，都要保证最终尺寸足够 crop
+        scale_x = max(scale_x, min_scale_x)
+        scale_y = max(scale_y, min_scale_y)
+
+        # 只做一次 resize
+        if scale_x != 1.0 or scale_y != 1.0:
             img1 = cv2.resize(img1, None, fx=scale_x, fy=scale_y, interpolation=cv2.INTER_LINEAR)
             img2 = cv2.resize(img2, None, fx=scale_x, fy=scale_y, interpolation=cv2.INTER_LINEAR)
             flow = cv2.resize(flow, None, fx=scale_x, fy=scale_y, interpolation=cv2.INTER_NEAREST)
@@ -92,37 +105,44 @@ class SceneFlowAugmentor:
             dd1 = cv2.resize(dd1, None, fx=scale_x, fy=scale_y, interpolation=cv2.INTER_NEAREST)
 
             flow = flow * [scale_x, scale_y]
+            intrinsics *= [scale_x, scale_y, scale_x, scale_y]
 
         if self.do_flip:
-            if np.random.rand() < self.h_flip_prob:  # h-flip
+            if np.random.rand() < self.h_flip_prob:
                 img1 = img1[:, ::-1]
                 img2 = img2[:, ::-1]
                 flow = flow[:, ::-1] * [-1.0, 1.0]
                 d1 = d1[:, ::-1]
                 d2 = d2[:, ::-1]
                 dd1 = dd1[:, ::-1]
+                intrinsics[2] = (img1.shape[1] - 1) - intrinsics[2]
 
-            if np.random.rand() < self.v_flip_prob:  # v-flip
+            if np.random.rand() < self.v_flip_prob:
                 img1 = img1[::-1, :]
                 img2 = img2[::-1, :]
                 flow = flow[::-1, :] * [1.0, -1.0]
                 d1 = d1[::-1, :]
                 d2 = d2[::-1, :]
                 dd1 = dd1[::-1, :]
+                intrinsics[3] = (img1.shape[0] - 1) - intrinsics[3]
 
-        y0 = np.random.randint(0, img1.shape[0] - self.crop_size[0])
-        x0 = np.random.randint(0, img1.shape[1] - self.crop_size[1])
+        h, w = img1.shape[:2]
+        max_y0 = h - crop_h
+        max_x0 = w - crop_w
 
-        img1 = img1[y0:y0 + self.crop_size[0], x0:x0 + self.crop_size[1]]
-        img2 = img2[y0:y0 + self.crop_size[0], x0:x0 + self.crop_size[1]]
-        flow = flow[y0:y0 + self.crop_size[0], x0:x0 + self.crop_size[1]]
-        d1 = d1[y0:y0 + self.crop_size[0], x0:x0 + self.crop_size[1]]
-        d2 = d2[y0:y0 + self.crop_size[0], x0:x0 + self.crop_size[1]]
-        dd1 = dd1[y0:y0 + self.crop_size[0], x0:x0 + self.crop_size[1]]
+        y0 = 0 if max_y0 <= 0 else np.random.randint(0, max_y0 + 1)
+        x0 = 0 if max_x0 <= 0 else np.random.randint(0, max_x0 + 1)
+
+        img1 = img1[y0:y0 + crop_h, x0:x0 + crop_w]
+        img2 = img2[y0:y0 + crop_h, x0:x0 + crop_w]
+        flow = flow[y0:y0 + crop_h, x0:x0 + crop_w]
+        d1 = d1[y0:y0 + crop_h, x0:x0 + crop_w]
+        d2 = d2[y0:y0 + crop_h, x0:x0 + crop_w]
+        dd1 = dd1[y0:y0 + crop_h, x0:x0 + crop_w]
+
         intrinsics -= [0.0, 0.0, x0, y0]
 
-
-        return img1, img2, flow, d1,d2,dd1,intrinsics
+        return img1, img2, flow, d1, d2, dd1, intrinsics
 
     def __call__(self, img1, img2, flow, d1,d2,dd1,intrinsics):
         img1, img2 = self.color_transform(img1, img2)
@@ -271,9 +291,9 @@ class SceneFlowAugmentorSparse:
 
         scale_x = np.clip(scale_x, min_scale, None)
         scale_y = np.clip(scale_y, min_scale, None)
-        intrinsics *= [scale_x, scale_y, scale_x, scale_y]
         valid = valid.astype(np.float32)
         if np.random.rand() < self.spatial_aug_prob:
+            intrinsics *= [scale_x, scale_y, scale_x, scale_y]
             # rescale the images
             img1 = cv2.resize(img1, None, fx=scale_x, fy=scale_y, interpolation=cv2.INTER_LINEAR)
             img2 = cv2.resize(img2, None, fx=scale_x, fy=scale_y, interpolation=cv2.INTER_LINEAR)
@@ -293,6 +313,7 @@ class SceneFlowAugmentorSparse:
                 valid = valid[:, ::-1]
                 d2 = d2[:, ::-1]
                 dd1 = dd1[:, ::-1]
+                intrinsics[2] = (img1.shape[1] - 1) - intrinsics[2]
 
             if np.random.rand() < self.v_flip_prob:  # v-flip
                 img1 = img1[::-1, :]
@@ -302,6 +323,7 @@ class SceneFlowAugmentorSparse:
                 valid = valid[::-1, :]
                 d2 = d2[::-1, :]
                 dd1 = dd1[::-1, :]
+                intrinsics[3] = (img1.shape[0] - 1) - intrinsics[3]
 
         y0 = np.random.randint(0, img1.shape[0] - self.crop_size[0])
         x0 = np.random.randint(0, img1.shape[1] - self.crop_size[1])

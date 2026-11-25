@@ -69,7 +69,7 @@ def readPFM(file):
 
 def writeFlow(filename,uv,v=None):
     """ Write optical flow to file.
-    
+
     If v is None, uv is assumed to contain both u and v channels,
     stacked in depth.
     Original code by Deqing Sun, adapted from Daniel Scharstein.
@@ -191,7 +191,7 @@ def writeFlowKITTI(filename, uv):
     valid = np.ones([uv.shape[0], uv.shape[1], 1])
     uv = np.concatenate([uv, valid], axis=-1).astype(np.uint16)
     cv2.imwrite(filename, uv[..., ::-1])
-    
+
 
 def read_gen(file_name, pil=False):
     ext = splitext(file_name)[-1]

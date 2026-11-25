@@ -4,9 +4,18 @@ from core.utils.utils import bilinear_sampler
 
 try:
     import alt_cuda_corr
-except:
-    # alt_cuda_corr is not compiled
-    pass
+    _ALT_CUDA_CORR_IMPORT_ERROR = None
+except ImportError as exc:
+    alt_cuda_corr = None
+    _ALT_CUDA_CORR_IMPORT_ERROR = exc
+
+
+def _require_alt_cuda_corr():
+    if alt_cuda_corr is None:
+        raise RuntimeError(
+            "alt_cuda_corr is required by SEAFlow3D. Build it with "
+            "`cd alt_cuda_corr && pip install -v --no-build-isolation .`"
+        ) from _ALT_CUDA_CORR_IMPORT_ERROR
 
 
 class CorrBlock:
@@ -63,6 +72,7 @@ class CorrBlock:
 class AltCorrFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, fmap1, fmap2, coords, radius):
+        _require_alt_cuda_corr()
         ctx.radius = radius
         ctx.save_for_backward(fmap1, fmap2, coords)
 
@@ -72,6 +82,7 @@ class AltCorrFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_corr):
+        _require_alt_cuda_corr()
         radius = ctx.radius
         fmap1, fmap2, coords = ctx.saved_tensors
         d_corr = d_corr.contiguous()
@@ -87,6 +98,7 @@ def alt_corr(fmap1, fmap2, coords, radius):
 
 
 def alt_corr3d(fmap1, fmap2, coords, radius):
+    _require_alt_cuda_corr()
     corr, = alt_cuda_corr.forward3d(fmap1, fmap2, coords, radius)
     return corr
 
@@ -101,34 +113,6 @@ class CudaBroadCorrBlock:
 
         fmap2 = F.avg_pool2d(fmap2, 2, stride=2)
         self.fmap2.append(fmap2)
-
-    def __call__(self, coords1):
-        r = self.radius
-
-        fmap1_i = self.fmap1.permute(0, 2, 3, 1).contiguous()  # b, h1, w1, c
-        coords1 = coords1.permute(0, 2, 3, 1)  # b, h, w, 2
-
-        corr_list = []
-        for i, fmap2_i in enumerate(self.fmap2):
-            fmap2_i = fmap2_i.permute(0, 2, 3, 1).contiguous()  # b, h2, w2, c
-
-            coords_i = (coords1 / 2 ** i).reshape(self.b, 1, self.h, self.w, 2).contiguous()
-            corr = alt_corr(fmap1_i, fmap2_i, coords_i, r)  # b, 1, (2r+1)^2, h, w
-            corr_list.append(corr.squeeze(1))  # b, (2r+1)^2, h, w
-
-        corrs = torch.stack(corr_list, dim=1)
-        corrs = corrs.reshape(self.b, self.corr_depth, self.h, self.w)
-        corrs = corrs / torch.sqrt(torch.tensor(self.feature_dim).float())
-
-        return corrs
-class CudaBroadCorrBlockSG:
-    def __init__(self, fmap1, fmap2, radius=4):
-        self.b, self.feature_dim, self.h, self.w = fmap1.shape
-        self.corr_depth = ((radius*2+1)**2)
-
-        self.radius = radius
-        self.fmap1 = fmap1
-        self.fmap2 = [fmap2]
 
     def __call__(self, coords1):
         r = self.radius
@@ -175,17 +159,9 @@ class CudaBroadCorrBlock3d:
             coords_i = (coords1 / 2 ** i).reshape(self.b, 1, self.h, self.w, 2).contiguous()
             corr = alt_corr3d(fmap1_i, fmap2_i, coords_i, r)  # b, 1, (2r+1)^2, h, w
             corr_list.append(corr.squeeze(1))  # b, c,(2r+1)^2, h, w
-            '''
-            corrs = corr.reshape(self.b, 1, 3, 2*r+1,2*r+1,self.h, self.w).detach().cpu().numpy()
-            fmap1_is = fmap1_i.detach().cpu().numpy()
-            fmap2_is = fmap2_i.detach().cpu().numpy()
-            '''
         corrs = torch.stack(corr_list, dim=1).permute(0,2,1,3,4,5)
         corrs = corrs.reshape(self.b, 3,self.corr_depth, self.h, self.w)
-        corrs = corrs / torch.sqrt(torch.tensor(self.feature_dim).float())
-
         return corrs
-
 class CudaBroadCorrBlockNs:
     def __init__(self, fmap1, fmap2, radius=4):
         self.b, self.feature_dim, self.h, self.w = fmap1.shape
@@ -210,5 +186,33 @@ class CudaBroadCorrBlockNs:
             corr_list.append(corr.squeeze(1))  # b, c,(2r+1)^2, h, w
         corrs = torch.stack(corr_list, dim=1).permute(0,2,1,3,4,5)
         corrs = corrs.reshape(self.b, 3,self.corr_depth, self.h, self.w)
+
+        return corrs
+class CudaBroadCorrBlockSG:
+    def __init__(self, fmap1, fmap2, radius=4):
+        self.b, self.feature_dim, self.h, self.w = fmap1.shape
+        self.corr_depth = ((radius*2+1)**2)
+
+        self.radius = radius
+        self.fmap1 = fmap1
+        self.fmap2 = [fmap2]
+
+    def __call__(self, coords1):
+        r = self.radius
+
+        fmap1_i = self.fmap1.permute(0, 2, 3, 1).contiguous()  # b, h1, w1, c
+        coords1 = coords1.permute(0, 2, 3, 1)  # b, h, w, 2
+
+        corr_list = []
+        for i, fmap2_i in enumerate(self.fmap2):
+            fmap2_i = fmap2_i.permute(0, 2, 3, 1).contiguous()  # b, h2, w2, c
+
+            coords_i = (coords1 / 2 ** i).reshape(self.b, 1, self.h, self.w, 2).contiguous()
+            corr = alt_corr(fmap1_i, fmap2_i, coords_i, r)  # b, 1, (2r+1)^2, h, w
+            corr_list.append(corr.squeeze(1))  # b, (2r+1)^2, h, w
+
+        corrs = torch.stack(corr_list, dim=1)
+        corrs = corrs.reshape(self.b, self.corr_depth, self.h, self.w)
+        corrs = corrs / torch.sqrt(torch.tensor(self.feature_dim).float())
 
         return corrs

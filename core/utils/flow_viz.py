@@ -324,7 +324,91 @@ def make_color_wheel(bins=None):
         col += bins[i]
 
     return color_wheel.T
+def flow2rgbabs(flow, color_wheel=None, unknown_thr=1e6,
+             max_flow=20.0, zero_thr=0.0, clip=True):
+    """Convert flow map to RGB image with fixed absolute normalization.
 
+    Args:
+        flow (ndarray): HxWx2 optical flow.
+        color_wheel (ndarray or None): Color wheel used to map flow field.
+        unknown_thr (float): Values above this threshold are treated as invalid.
+        max_flow (float): Fixed flow magnitude used for visualization scaling.
+            For example, max_flow=20 means 20px displacement reaches full saturation.
+        zero_thr (float): Flow magnitude below this value is treated as zero.
+            Useful for suppressing static-region noise.
+        clip (bool): Whether to clip normalized flow into [-1, 1].
+
+    Returns:
+        ndarray: HxWx3 RGB image in [0, 1].
+    """
+    assert flow.ndim == 3 and flow.shape[-1] == 2
+
+    if color_wheel is None:
+        color_wheel = make_color_wheel()
+
+    assert color_wheel.ndim == 2 and color_wheel.shape[1] == 3
+    assert max_flow > 0
+
+    num_bins = color_wheel.shape[0]
+
+    dx = flow[:, :, 0].copy()
+    dy = flow[:, :, 1].copy()
+
+    ignore_inds = (
+        np.isnan(dx) | np.isnan(dy) |
+        (np.abs(dx) > unknown_thr) |
+        (np.abs(dy) > unknown_thr)
+    )
+
+    dx[ignore_inds] = 0
+    dy[ignore_inds] = 0
+
+    # 原始模长，用于判断静止噪声
+    rad_raw = np.sqrt(dx ** 2 + dy ** 2)
+
+    # 抑制近似静止区域的小噪声
+    if zero_thr > 0:
+        zero_inds = rad_raw < zero_thr
+        dx[zero_inds] = 0
+        dy[zero_inds] = 0
+
+    # 固定尺度归一化，不再使用当前图像自身的最大值
+    dx_vis = dx / max_flow
+    dy_vis = dy / max_flow
+
+    if clip:
+        dx_vis = np.clip(dx_vis, -1.0, 1.0)
+        dy_vis = np.clip(dy_vis, -1.0, 1.0)
+
+    rad = np.sqrt(dx_vis ** 2 + dy_vis ** 2)
+
+    angle = np.arctan2(-dy_vis, -dx_vis) / np.pi
+
+    bin_real = (angle + 1) / 2 * (num_bins - 1)
+    bin_left = np.floor(bin_real).astype(int)
+    bin_right = (bin_left + 1) % num_bins
+
+    w = (bin_real - bin_left.astype(np.float32))[..., None]
+
+    flow_img = (
+        (1 - w) * color_wheel[bin_left, :] +
+        w * color_wheel[bin_right, :]
+    )
+
+    small_ind = rad <= 1
+
+    # 小运动：接近白色，运动越大颜色越饱和
+    flow_img[small_ind] = 1 - rad[small_ind, None] * (
+        1 - flow_img[small_ind]
+    )
+
+    # 超过 max_flow 的大运动：压暗
+    flow_img[np.logical_not(small_ind)] *= 0.75
+
+    # invalid 区域设为黑色
+    flow_img[ignore_inds, :] = 0
+
+    return flow_img
 def flow2rgb(flow, color_wheel=None, unknown_thr=1e6):
     """Convert flow map to RGB image.
 
