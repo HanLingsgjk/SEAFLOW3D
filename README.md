@@ -19,6 +19,8 @@ This repository contains the official implementation of our paper on stereo scen
   and the rigid background refinement of CamLiFlow turned on by default.
 
 The conference version of the code and its checkpoint links remain available at commit `abb6421`.
+The KITTI 2015 submission of the conference version (2025-06-27) is archived in [`legacy_kitti2025/`](legacy_kitti2025/).
+The archive holds its training setup, the code that produced it, the rigid background refinement with MSeg masks, and the submitted zip as a release asset.
 
 ## Paper
 
