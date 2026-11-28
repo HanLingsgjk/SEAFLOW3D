@@ -17,7 +17,6 @@ Official implementation of **SEA-Flow3D: Simplified, Efficient, and Accurate Sce
 - **2026-11-25, v2.0.** The conference code threw away the GRU hidden state at every iteration. It is now carried across iterations, and the weights were retrained.
 
 The conference version of the code and its checkpoint links remain available at commit `abb6421`.
-Every difference from the paper is listed in [Differences from the paper](#differences-from-the-paper).
 
 ## KITTI 2015 Results
 
@@ -31,24 +30,6 @@ They differ only in the stereo disparities, which serve both as the network inpu
 | [SEA-Flow3D+GANET](https://www.cvlibs.net/datasets/kitti/eval_scene_flow_detail.php?benchmark=scene_flow&result=523304ac2cc2cd5138436a0622bc0008a3401baa) | GA-Net | MSeg mask, shrunk by 5 px | 1.81 | 2.95 | 2.95 | 2.82 | 10.97 | 4.18 |
 
 The network runs in 0.17 s per pair on an NVIDIA L40. How to reproduce both entries is described in [KITTI 2015 Submission](#kitti-2015-submission).
-
-## Differences from the paper
-
-| | Paper / conference version (code at `abb6421`, KITTI submission of 2025) | This repository (v2.1) |
-|---|---|---|
-| GRU hidden state | The hidden state returned by the update block was discarded at every iteration (`net, ... = self.update_block(net8, ...)`), so the GRU had no memory across iterations at 1/16, 1/8 and 1/4 resolution | Carried on to the next iteration (`net8, ... = self.update_block(net8, ...)`), since v2.0 |
-| Spatial vector correlation | Divided by √3 (the feature dimension) at the end of `CudaBroadCorrBlock3d` | Not divided, so `corr3d[:, 1]` is in disparity pixels (since v2.0) |
-| Depth-change cue fed to the update block | `corr3d[:, 1]`: the disparity change d2(candidate) − d1 implied by each candidate match | `corr3d[:, 1] − depthc`: the same cue minus the current estimate d2 − d1 (`--model seaflow3d_cd`, v2.1 weights). `--model seaflow3d` keeps the conference form for the v2.0 weights |
-| Depth-change loss | In `train_flow3d_ab.py` the depth change of iteration i − 1 was supervised with the weight of iteration i, so the last iteration had no depth-change loss | Every iteration is supervised with its own weight (`train_flowp2p.py`) |
-| Loss decay γ | 0.8 (Eq. 8) | 0.85 |
-| KITTI training | Stage 1: Driving + VKITTI2, 200k steps, batch 6, 320 × 720, lr 5e-4. Stage 2: KITTI + Driving + VKITTI2, 100k steps, batch 6, lr 2.5e-4 | `--stage driving` (VKITTI2 + 200 × KITTI + Driving) from scratch, 160k steps, batch 6, 320 × 960, lr 2.5e-4. Then `--stage kitti` (the 200 KITTI training pairs), 20k steps, batch 6, 320 × 960, lr 1e-4 |
-| VKITTI2 pairs used | Every fifth pair dropped (67,712 pairs) | All pairs (84,640) |
-| KITTI test: input disparities and D1 | GA-Net (SEA-Flow3D+G) or MonSter (SEA-Flow3D+M) | GA-Net disparities released by RAFT-3D (SEA-Flow3D+GANET) or MonSter++ disparities (SEA-Flow3D + Monster), used both as the network input and as D1; holes of D1 filled like the devkit's `interpolateBackground` |
-| KITTI test: D2 | D1 + predicted disparity change | D1 / τ, which equals D1 + predicted disparity change wherever the input disparity is valid |
-| Rigid background refinement: background mask | MSeg universal taxonomy minus 26 movable classes, not shrunk | The same MSeg mask (`mseg-3m-480p`, 360p multi-scale), shrunk by 5 px |
-| Rigid background refinement: pose fit | Background pixels whose flow stays inside the image, without the top 80 rows | The same |
-
-The iterations (2 / 4 / 3 at 1/16, 1/8 and 1/4 resolution) are the same as in the paper. They are hard-coded in `forward`.
 
 ## Run on ZED X
 <img width="2979" height="1646" alt="git" src="https://github.com/user-attachments/assets/364201cf-f229-4c61-bd81-a6b6513d15b6" />
