@@ -13,7 +13,7 @@ Official implementation of **SEA-Flow3D: Simplified, Efficient, and Accurate Sce
   - New model option `--model seaflow3d_cd` (`model_home/SEAFlow3D_corrd.py`). It passes the update block the depth-change cue relative to the current estimate.
   - New KITTI weights for it, trained with the KITTI schedule in [Training](#training).
   - `kitti_submission.py` now reproduces our two current KITTI 2015 entries (see [KITTI 2015 Results](#kitti-2015-results)).
-    The GA-Net entry also uses an MSeg background mask shrunk by 5 px for the rigid background refinement.
+    Both use an MSeg background mask shrunk by 5 px for the rigid background refinement.
 - **2026-11-25, v2.0.** The conference code threw away the GRU hidden state at every iteration. It is now carried across iterations, and the weights were retrained.
 
 The conference version of the code and its checkpoint links remain available at commit `abb6421`.
@@ -22,11 +22,12 @@ Every difference from the paper is listed in [Differences from the paper](#diffe
 ## KITTI 2015 Results
 
 Scene flow test set, outliers in % (background / foreground / all pixels), as shown by the KITTI server for our two entries submitted on 2026-11-28.
-Both use the v2.1 checkpoint `seaflow3d_driving_kitti.pth`. They differ in the stereo disparities, which serve both as the network input and as D1, and in the rigid background refinement.
+Both use the v2.1 checkpoint `seaflow3d_driving_kitti.pth` and the rigid background refinement with the MSeg mask shrunk by 5 px.
+They differ only in the stereo disparities, which serve both as the network input and as D1.
 
 | Entry | Disparities | Rigid background refinement | D1-all | D2-all | Fl-all | SF-bg | SF-fg | SF-all |
 |---|---|---|---|---|---|---|---|---|
-| [SEA-Flow3D + Monster](https://www.cvlibs.net/datasets/kitti/eval_scene_flow_detail.php?benchmark=scene_flow&result=70059c08e1e64750da2d91a471ad41a7bf6489ed) | MonSter++ | none | 1.37 | 2.30 | 2.37 | 2.09 | 9.42 | 3.31 |
+| [SEA-Flow3D + Monster](https://www.cvlibs.net/datasets/kitti/eval_scene_flow_detail.php?benchmark=scene_flow&result=70059c08e1e64750da2d91a471ad41a7bf6489ed) | MonSter++ | MSeg mask, shrunk by 5 px | 1.37 | 2.30 | 2.37 | 2.09 | 9.42 | 3.31 |
 | [SEA-Flow3D+GANET](https://www.cvlibs.net/datasets/kitti/eval_scene_flow_detail.php?benchmark=scene_flow&result=523304ac2cc2cd5138436a0622bc0008a3401baa) | GA-Net | MSeg mask, shrunk by 5 px | 1.81 | 2.95 | 2.95 | 2.82 | 10.97 | 4.18 |
 
 The network runs in 0.17 s per pair on an NVIDIA L40. How to reproduce both entries is described in [KITTI 2015 Submission](#kitti-2015-submission).
@@ -44,7 +45,7 @@ The network runs in 0.17 s per pair on an NVIDIA L40. How to reproduce both entr
 | VKITTI2 pairs used | Every fifth pair dropped (67,712 pairs) | All pairs (84,640) |
 | KITTI test: input disparities and D1 | GA-Net (SEA-Flow3D+G) or MonSter (SEA-Flow3D+M) | GA-Net disparities released by RAFT-3D (SEA-Flow3D+GANET) or MonSter++ disparities (SEA-Flow3D + Monster), used both as the network input and as D1; holes of D1 filled like the devkit's `interpolateBackground` |
 | KITTI test: D2 | D1 + predicted disparity change | D1 / τ, which equals D1 + predicted disparity change wherever the input disparity is valid |
-| Rigid background refinement: background mask | MSeg universal taxonomy minus 26 movable classes, not shrunk | The same MSeg mask (`mseg-3m-480p`, 360p multi-scale), shrunk by 5 px. Used for the GA-Net entry; the MonSter++ entry is not refined |
+| Rigid background refinement: background mask | MSeg universal taxonomy minus 26 movable classes, not shrunk | The same MSeg mask (`mseg-3m-480p`, 360p multi-scale), shrunk by 5 px |
 | Rigid background refinement: pose fit | Background pixels whose flow stays inside the image, without the top 80 rows | The same |
 
 The iterations (2 / 4 / 3 at 1/16, 1/8 and 1/4 resolution) are the same as in the paper. They are hard-coded in `forward`.
@@ -217,9 +218,9 @@ Then run:
 git clone https://github.com/MCG-NJU/CamLiFlow.git third_party/CamLiFlow
 # SEA-Flow3D+GANET: GA-Net disparities, MSeg background mask shrunk by 5 px
 python kitti_submission.py --ckpt checkpoints/seaflow3d_driving_kitti.pth --kitti_root datasets/KITTI --out submission_ganet
-# SEA-Flow3D + Monster: MonSter++ disparities of both frames (MonSter's own PNG encoding), no rigid background refinement
+# SEA-Flow3D + Monster: MonSter++ disparities of both frames (MonSter's own PNG encoding), same MSeg background mask
 python kitti_submission.py --ckpt checkpoints/seaflow3d_driving_kitti.pth --kitti_root datasets/KITTI \
-    --disp_dir <MonSter++ disparities of the test set> --disp_format monster --no_refine --out submission_monster
+    --disp_dir <MonSter++ disparities of the test set> --disp_format monster --out submission_monster
 ```
 
 - With these inputs, the commands above reproduced every PNG of our two uploaded submissions byte for byte on our machine (NVIDIA L40).
