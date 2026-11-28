@@ -1,5 +1,8 @@
-"""SEA-Flow3D 训练入口（2026-11 起用它；发布的两份权重就是用这个脚本训的，命令见 README 的 Training 一节）
-只保留 SEA-Flow3D 一个模型（model_home/SEAFlow3D.py，已修正隐状态迭代）；数据集路径都从命令行给
+"""SEA-Flow3D 训练入口（2026-11 起用它；v2.0、v2.1 两次发布的权重都是用这个脚本训的，命令见 README 的 Training 一节）
+两个模型（层名相同）：
+  --model seaflow3d     model_home/SEAFlow3D.py，已修正隐状态迭代（v2.0 权重）
+  --model seaflow3d_cd  model_home/SEAFlow3D_corrd.py，再把喂给更新器的深度变化线索改成相对当前估计的残差（v2.1 权重）
+数据集路径都从命令行给
 """
 from __future__ import print_function, division
 import sys
@@ -15,12 +18,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from model_home.SEAFlow3D import SEAFLOW3D
+from model_home.SEAFlow3D_corrd import SEAFLOW3DCorrd
 import Dataset_home.dataset_3dflowuvd as datasets
 import flowp2p_validation as evaluate
 from torch.utils.tensorboard import SummaryWriter
 
 MODEL_REGISTRY = {
     "seaflow3d": SEAFLOW3D,
+    "seaflow3d_cd": SEAFLOW3DCorrd,
 }
 
 try:
@@ -299,7 +304,7 @@ if __name__ == '__main__':
     if args.val_freq < 0:
         parser.error("--val_freq must be non-negative")
     if args.itr1 != 6 or args.itr2 != 4:
-        parser.error("seaflow3d currently requires --itr1 6 --itr2 4")
+        parser.error("seaflow3d and seaflow3d_cd currently require --itr1 6 --itr2 4")
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)

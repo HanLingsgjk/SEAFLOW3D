@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from glob import glob
 import os.path as osp
 from model_home.SEAFlow3D import SEAFLOW3D
+from model_home.SEAFlow3D_corrd import SEAFLOW3DCorrd
 import Dataset_home.dataset_3dflowuvd as datasets
 from core.utils.utils import InputPadder
 from core.utils.flow_viz import flow2rgb
@@ -857,6 +858,8 @@ def kitti_sceneflow_submission(model):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', help="restore checkpoint")
+    parser.add_argument('--network', default='seaflow3d_cd', choices=['seaflow3d_cd', 'seaflow3d'],
+                        help="seaflow3d_cd for the v2.1 weights (default), seaflow3d for the v2.0 weights")
     parser.add_argument('--dataset', help="dataset for evaluation")
     parser.add_argument('--small', action='store_true', help='use small model')
     parser.add_argument('--model_type', default='ccmr')
@@ -882,8 +885,9 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # 2026-11：换成修正隐状态后的 SEAFLOW3D（model_home/SEAFlow3D.py），按层名严格加载发布的权重（checkpoint 带 DataParallel 的 module. 前缀）
-    model = torch.nn.DataParallel(SEAFLOW3D(args))
+    # 2026-11：修正隐状态后的 SEAFLOW3D（v2.0 权重）或再加深度变化残差的 SEAFLOW3DCorrd（v2.1 权重），按层名严格加载发布的权重
+    # （checkpoint 带 DataParallel 的 module. 前缀；两个模型层名相同，--network 要和权重配对）
+    model = torch.nn.DataParallel({'seaflow3d_cd': SEAFLOW3DCorrd, 'seaflow3d': SEAFLOW3D}[args.network](args))
     model.load_state_dict(torch.load(args.model, map_location='cpu'), strict=True)
 
     model.cuda()
