@@ -12,7 +12,8 @@
                      估相机运动时再去掉最上面 80 行（同我们 2025 年会议版的提交）
        ddr        ：DDR-Net 语义分割的静态类（label <= 22，CamLiFlow 原版）
      两种掩码都先向内收 --erode 个像素（默认 5，避开分割在物体边缘的错）
-  4. 打两个 zip：kitti_sceneflow2015.zip（disp_0 / disp_1 / flow）和 kitti_flow2015.zip（flow），两个 zip 里的 flow 相同
+  4. 打两个 zip：kitti_sceneflow2015.zip（disp_0 / disp_1 / flow，第 3 步优化之后的结果）和 kitti_flow2015.zip（光流榜用，
+     网络原始光流，不做刚性背景优化）
 刚性背景优化另外需要（本仓库不附带）：CamLiFlow 仓库（https://github.com/MCG-NJU/CamLiFlow，用它的 refine_utils.py）、
 KITTI 官方标定 data_scene_flow_calib.zip 里的 calib_cam_to_cam，以及 MSeg 掩码（生成方法见 README）或 CamLiFlow README 里的 semantic_ddr.zip
 用法：python kitti_submission.py --ckpt checkpoints/seaflow3d_driving_kitti.pth --kitti_root datasets/KITTI --camliflow_dir third_party/CamLiFlow --out submission
@@ -247,7 +248,7 @@ def main():
             args.mask, args.erode, sum(c > 0 for c in changed), float(np.median(changed))), flush=True)
 
     make_zip(final_dir, os.path.join(args.out, 'kitti_sceneflow2015.zip'), ['disp_0', 'disp_1', 'flow'])
-    make_zip(final_dir, os.path.join(args.out, 'kitti_flow2015.zip'), ['flow'])
+    make_zip(network_dir, os.path.join(args.out, 'kitti_flow2015.zip'), ['flow'])   # 光流榜用网络原始光流，不做刚性背景优化
 
 
 if __name__ == '__main__':

@@ -163,7 +163,8 @@ It writes `kitti_sceneflow2015.zip` (`disp_0`, `disp_1`, `flow`) and `kitti_flow
      - `--mask ddr` uses CamLiFlow's DDR-Net segmentation instead (static classes, label ≤ 22).
      - `--erode 0` keeps the mask unshrunk.
      - `--no_refine` skips this step.
-4. **Zip.** Both zips contain the same refined `flow/`.
+4. **Zip.** `kitti_sceneflow2015.zip` contains the refined outputs.
+   `kitti_flow2015.zip`, for the optical flow benchmark, contains the network's own flow without the rigid background refinement.
 
 Data and tools (none of them is included here):
 
