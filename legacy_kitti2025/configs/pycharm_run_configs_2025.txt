@@ -1,0 +1,30 @@
+Run configurations and shell history found for the SEAFLOW3D scripts (the evidence behind ../TRAINING.md)
+=====================================================================================================
+Format: script | parameters | environment
+
+PyCharm workspace.xml, snapshot of 2025-06-24 20:31 (server copy of the project's .idea folder)
+----------------------------------------------------------------------------------------
+train_flow3duvd.py | --name RFlow3D_Sintel_train_finting --stage Sintel_CamLi --validation kitti | CUDA_VISIBLE_DEVICES=2,3
+train_flow3d_ab.py | --name ab8range --stage abtrain --ab 8 | CUDA_VISIBLE_DEVICES=2
+train_flow3d.py    | --name RFlow3Duvd --restore_ckpt /home/lh/CSCV_occ/checkpoints/ccmr.pth --stage pretrain --validation kitti --gpus 0 --num_steps 100000 --batch_size 2 --lr 0.00025 --image_size 320 720 --wdecay 0.0001 --gamma=0.85 | CUDA_VISIBLE_DEVICES=3
+RFlow3Dtest.py     | --model=/home/lh/CSCV_occ/checkpoints/RFlow3D_Sintel_CamLi.pth | CUDA_VISIBLE_DEVICES=1
+
+PyCharm workspace.xml, later local copy (last saved 2026-06-01); entries not in the snapshot above
+---------------------------------------------------------------------------------------------
+train_flow3duvd.py | --name RFlow3D_all_mixed --stage pretrain --validation kitti | CUDA_VISIBLE_DEVICES=1,2,3
+train_flow3d_ab.py | --name ab8range --stage abtrain --ab 18 --restore_ckpt=/home/lh/CSCV_occ_new/checkpoints/RF_range_iter44_242.pth | CUDA_VISIBLE_DEVICES=2
+RFlow3Dtest.py     | --model=/home/lh/CSCV_occ/checkpoints/RFlow3D_DRIVING_train_finting.pth | CUDA_VISIBLE_DEVICES=1
+RFlow3Dtest.py     | --model=/home/lh/CSCV_occ_new/checkpoints/RFlow3D_abv8.pth | CUDA_VISIBLE_DEVICES=0
+RFlow3Dtest.py     | --model=/home/lh/CSCV_occ_new/checkpoints/RFlow3D_all_mixed.pth | CUDA_VISIBLE_DEVICES=0
+RFlow3Dtest.py     | --model=/home/lh/CSCV_occ_new/checkpoints/RFlow3D_Sintel_CamLi.pth | CUDA_VISIBLE_DEVICES=0
+
+Shell history of the training server (no timestamps; run from /home/lh/CSCV_occ), SEAFLOW3D-related lines of May-June 2025
+-------------------------------------------------------------------------------------------------------------------
+CUDA_VISIBLE_DEVICES=0,1 python train_flow3d_ab.py --batch_size 4 --gpus 0 1 --name Sintel_pre --stage pretrain --num_steps 200000 --ab 8
+CUDA_VISIBLE_DEVICES=1  python train_flow3d_ab.py --name RFlow3D_abv8 --ab 8 --stage abtrain --batch_size 4 --lr 0.0002 --num_steps 100000 --gpus 0 --image_size 320 640 --gamma=0.85
+CUDA_VISIBLE_DEVICES=1  python train_flow3d_ab.py --name RFlow3D_abv16 --ab 16 --stage abtrain --batch_size 4 --lr 0.0002 --num_steps 100000 --gpus 0 --image_size 320 640 --gamma=0.85
+CUDA_VISIBLE_DEVICES=1,2,3 python train_flow3d_ab.py --name RFlow3Ddriving --ab 12 --stage driving --num_steps 120000 --batch_size 6 --name RFlow3D12d --gpus 0 1 2 --image_size 320 768
+CUDA_VISIBLE_DEVICES=1,2,3 python train_flow3d_ab.py --name RFlow3Ddft --ab 12 --stage fineting --num_steps 60000 --batch_size 6 --name RFlow3D12d --gpus 0 1 2 --image_size 320 768 --lr 0.0001 --restore_ckpt /home/lh/CSCV_occ/checkpoints/RFlow3D12d.pth
+
+No launch command was found for RFlow3D_DRIVING_train_finting, RFlow3D_Sintel_train_PRE or RFlow3D_Sintel_train_fine.
+The PyCharm entries are edited in place, so one entry name can stand for several runs.

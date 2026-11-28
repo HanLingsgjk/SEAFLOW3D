@@ -17,6 +17,8 @@ Official implementation of **SEA-Flow3D: Simplified, Efficient, and Accurate Sce
 - **2026-11-25, v2.0.** The conference code threw away the GRU hidden state at every iteration. It is now carried across iterations, and the weights were retrained.
 
 The conference version of the code and its checkpoint links remain available at commit `abb6421`.
+The KITTI 2015 submission of the conference version (2025-06-27) is archived in [`legacy_kitti2025/`](legacy_kitti2025/).
+The archive holds its training setup, the code that produced it, the rigid background refinement with MSeg masks, and the submitted zip as a release asset.
 
 ## KITTI 2015 Results
 
